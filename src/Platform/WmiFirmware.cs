@@ -6,7 +6,7 @@ namespace Forja.Platform
 {
     // Not thread-safe: each instance is used from one thread only (the UI thread's, or the
     // isolated emergency writer's own instance).
-    public class WmiFirmware : IFirmware
+    public class WmiFirmware : IFirmwareExt, IFirmwareProbe, IFirmwareLayout
     {
         private ManagementObject instance;
         private bool available;
@@ -14,8 +14,13 @@ namespace Forja.Platform
         // (class missing at logon, provider restarted) instead of failing forever or hammering.
         private readonly ReconnectPolicy reconnect = new ReconnectPolicy();
 
+        // The fans this notebook has: the commands address only those (FanLayoutStore; both until an
+        // environment profile says otherwise). Set again by the owner when the wizard finishes.
+        public FanLayout Layout { get; set; }
+
         public WmiFirmware()
         {
+            Layout = FanLayoutStore.Current;
             Connect();
         }
 
@@ -137,17 +142,12 @@ namespace Forja.Platform
             if (!raw.HasValue) return null;
             byte? p = Codes.DecodeProfile(raw.Value);
             if (!p.HasValue) return null;
-            if (p.Value == Codes.ProfileQuiet) return PerfMode.Silencioso;
-            if (p.Value == Codes.ProfileBalanced) return PerfMode.DiaADia;
-            if (p.Value == Codes.ProfilePerformance) return PerfMode.Desempenho;
-            return null;
+            return ModeCatalog.FromCode(p.Value);
         }
 
         public bool SetMode(PerfMode m)
         {
-            byte profile = Codes.ProfileBalanced;
-            if (m == PerfMode.Silencioso) profile = Codes.ProfileQuiet;
-            else if (m == PerfMode.Desempenho) profile = Codes.ProfilePerformance;
+            byte profile = ModeCatalog.ProfileCode(m);
             if (!Set("SetGamingMiscSetting", Codes.ProfileSet(profile))) return false;
             // gmOutput == 0 only means "accepted"; confirm the profile really changed.
             PerfMode? now = GetMode();
@@ -156,14 +156,14 @@ namespace Forja.Platform
 
         public bool SetFanAuto()
         {
-            return Set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Auto, FanMode.Auto));
+            return Set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Auto, FanMode.Auto, Layout));
         }
 
-        // Not part of IFirmware: the "Máximo" option (offered only after the hardware
+        // Part of IFirmwareExt, not IFirmware: the "Máximo" option (offered only after the hardware
         // validation) and the validation routine itself.
         public bool SetFanMax()
         {
-            if (!Set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Max, FanMode.Max))) return false;
+            if (!Set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Max, FanMode.Max, Layout))) return false;
             FanMode? cpu;
             FanMode? gpu;
             return GetFanBehavior(out cpu, out gpu) && cpu == FanMode.Max && gpu == FanMode.Max;
@@ -183,8 +183,8 @@ namespace Forja.Platform
         {
             cpu = null;
             gpu = null;
-            ulong? raw = Get("GetGamingFanBehavior", Codes.FanBehaviorQuery);
-            return raw.HasValue && Codes.DecodeFanBehavior(raw.Value, out cpu, out gpu);
+            ulong? raw = Get("GetGamingFanBehavior", Codes.FanBehaviorQueryFor(Layout));
+            return raw.HasValue && Codes.DecodeFanBehavior(raw.Value, Layout, out cpu, out gpu);
         }
 
         public bool SetFanPercent(int cpuPct, int gpuPct)
@@ -192,7 +192,25 @@ namespace Forja.Platform
             // The speed-write encoding is accepted by the firmware but its effect is proven only
             // by the hardware validation (--validar-ventoinha); until it passes nothing calls this
             // outside that routine. Any failed step restores Auto (see FanSequence).
-            return FanSequence.SetPercent(Set, cpuPct, gpuPct);
+            return FanSequence.SetPercent(Set, cpuPct, gpuPct, Layout);
+        }
+
+        // ---- read-only probe of what the firmware announces (the environment test) ----------------
+
+        public ulong? ReadSensorBitmapRaw()
+        {
+            return Get("GetGamingSysInfo", Codes.SysInfoSensorBitmap);
+        }
+
+        public ulong? ReadProfileBitmapRaw()
+        {
+            return Get("GetGamingMiscSetting", Codes.MiscProfileBitmap);
+        }
+
+        public byte? ReadProfileCode()
+        {
+            ulong? raw = Get("GetGamingMiscSetting", Codes.MiscProfile);
+            return raw.HasValue ? Codes.DecodeProfile(raw.Value) : null;
         }
     }
 }

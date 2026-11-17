@@ -11,7 +11,8 @@ namespace Forja.Platform
         public double? TempC;
     }
 
-    // Polled by the UI only while the window is visible; owns no threads or timers.
+    // Polled by the UI only while the window is visible; owns no threads or timers. GPU readings
+    // (nvidia-smi and the GPU Engine counters) moved to TelemetryProbe, which gates them.
     public class SystemStats : IDisposable
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -32,13 +33,7 @@ namespace Forja.Platform
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
-        private const int GpuCacheMs = 2000;
-        private const int GpuTimeoutMs = 1500;
-
         private PerformanceCounter cpu;
-        private GpuInfo gpuCache;
-        private int gpuCacheTick;
-        private bool gpuCached;
 
         public SystemStats()
         {
@@ -115,61 +110,6 @@ namespace Forja.Platform
         {
             MEMORYSTATUSEX m;
             return Query(out m) ? (long)m.ullAvailPhys : -1L;
-        }
-
-        // Null when nvidia-smi is unavailable or fails. Cached for 2 s (failures too), so it runs at
-        // most every 2 s.
-        public GpuInfo Gpu()
-        {
-            int now = Environment.TickCount;
-            if (gpuCached && unchecked(now - gpuCacheTick) < GpuCacheMs)
-            {
-                return gpuCache;
-            }
-            gpuCache = QueryNvidiaSmi();
-            gpuCacheTick = now;
-            gpuCached = true;
-            return gpuCache;
-        }
-
-        private static GpuInfo QueryNvidiaSmi()
-        {
-            try
-            {
-                // Full path only (System32, else the NVIDIA folder): never the app folder or cwd.
-                string exe = InstallPaths.NvidiaSmiPath();
-                if (exe == null) return null;
-                ProcessStartInfo psi = new ProcessStartInfo(exe,
-                    "--query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits");
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
-                psi.RedirectStandardOutput = true;
-                using (Process p = Process.Start(psi))
-                {
-                    if (!p.WaitForExit(GpuTimeoutMs))
-                    {
-                        try
-                        {
-                            p.Kill();
-                        }
-                        catch (Exception)
-                        {
-                        }
-                        return null;
-                    }
-                    string text = p.StandardOutput.ReadToEnd();
-                    if (text == null)
-                    {
-                        return null;
-                    }
-                    int nl = text.IndexOf('\n');
-                    return ParseNvidiaSmi(nl >= 0 ? text.Substring(0, nl) : text);
-                }
-            }
-            catch (Exception)
-            {
-                return null;
-            }
         }
 
         // Parses "37, 54" (utilization %, temperature C). Null when nothing usable.

@@ -6,16 +6,21 @@ using Forja.Core;
 
 namespace Forja.App.Controls
 {
-    // Top strip from mockup D: LED + verdict word, detail text, and telemetry pairs on the right
-    // ("MODO Dia a dia", "VENTOINHA Automática"). The verdict is computed from the temperatures
-    // (InstrumentMath.VerdictFor), so it can never say "Estável" while a sensor is unavailable.
+    // Top strip from mockup D: LED + one of two words ("Estável" / "Requer sua atenção"), an optional
+    // detail text, and telemetry pairs on the right ("MODO Dia a dia", "VENTOINHA Automática").
+    // The state comes from the alert engine (sustained heat, thermal protection, sensor lost, fan
+    // safety event, restart not yet seen), so it can never say "Estável" while a sensor is unavailable.
+    // Clicking it while it asks for attention raises Clicked (the window opens the page that explains why).
     // When space runs out the detail is shortened first, then telemetry pairs are dropped from the
-    // left; the verdict word itself is never cut. 46 px tall at 100 %, bottom border included.
+    // left; the word itself is never cut. 46 px tall at 100 %, bottom border included.
     public class VerdictStrip : InstrumentControl
     {
         public const int LogicalHeight = 46;
 
-        private Verdict _verdict = Verdict.NoReading;
+        private StripState _state = StripState.Reading;
+        private bool _grace = true;
+        private bool _critical;
+        private string _reason;
         private string _detail = "";
         private readonly List<KeyValuePair<string, string>> _telemetry = new List<KeyValuePair<string, string>>();
 
@@ -37,20 +42,45 @@ namespace Forja.App.Controls
 
         public Verdict Verdict
         {
-            get { return _verdict; }
+            get
+            {
+                if (_state == StripState.Reading) return Verdict.NoReading;   // neutral LED
+                return _state == StripState.Stable ? Verdict.Stable : (_critical ? Verdict.Hot : Verdict.Attention);
+            }
         }
 
-        // Starts as "Sem leitura" until the first update.
-        public void UpdateTemps(double? cpuC, double? gpuC, bool gpuSleeping)
+        public bool NeedsAttention
         {
-            Verdict v = InstrumentMath.VerdictFor(cpuC, gpuC, gpuSleeping);
-            if (v == _verdict) return;
-            _verdict = v;
+            get { return _state == StripState.Attention; }
+        }
+
+        // Raised when the user clicks the strip while it asks for attention.
+        public event Action Clicked;
+
+        // critical: protection engaged (red LED). reason: the tooltip, null when stable.
+        public void SetState(StripState state, bool critical, string reason, bool readingGrace)
+        {
+            bool needs = state == StripState.Attention;
+            critical = needs && critical;
+            string why = needs ? reason : null;
+            if (state == _state && critical == _critical && why == _reason && readingGrace == _grace) return;
+            _state = state;
+            _grace = readingGrace;
+            _critical = critical;
+            _reason = why;
+            Cursor = needs ? System.Windows.Forms.Cursors.Hand : System.Windows.Forms.Cursors.Default;
             UpdateAccessibleText();
             Invalidate();
         }
 
-        // e.g. InstrumentMath.NoCrashSummary(2) = "Sem tela azul há 2 dias"
+        protected override void OnClick(EventArgs e)
+        {
+            base.OnClick(e);
+            Action h = Clicked;
+            if (_state == StripState.Attention && h != null) h();
+        }
+
+        // Optional sentence after the word (the read-only banner); never crash or restart text.
         public string Detail
         {
             get { return _detail; }
@@ -89,8 +119,14 @@ namespace Forja.App.Controls
 
         private void UpdateAccessibleText()
         {
-            AccessibleName = "Estado: " + InstrumentMath.VerdictLabel(_verdict);
-            StringBuilder sb = new StringBuilder(_detail);
+            string word = StripText.Label(_state, _grace);
+            AccessibleName = "Estado: " + (word.Length > 0 ? word : "ainda verificando");
+            StringBuilder sb = new StringBuilder(_state == StripState.Attention && _reason != null ? _reason : "");
+            if (_detail.Length > 0)
+            {
+                if (sb.Length > 0) sb.Append("; ");
+                sb.Append(_detail);
+            }
             foreach (KeyValuePair<string, string> p in _telemetry)
             {
                 if (sb.Length > 0) sb.Append("; ");
@@ -128,11 +164,12 @@ namespace Forja.App.Controls
             // LED + verdict word (never shortened)
             float led = Px(8f);
             Smooth(g);
-            g.FillEllipse(Res.Brush(Palette.ForVerdict(_verdict)), x, mid - led / 2f, led, led);
+            g.FillEllipse(Res.Brush(Palette.ForVerdict(Verdict)), x, mid - led / 2f, led, led);
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
             g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Default;
             x += led + Px(8f);
-            x += Ink.Draw(g, InstrumentMath.VerdictLabel(_verdict), state, Palette.Text, x, baseline, InkAlign.Left);
+            string word = StripText.Label(_state, _grace);
+            if (word.Length > 0) x += Ink.Draw(g, word, state, _state == StripState.Reading ? Palette.Sec : Palette.Text, x, baseline, InkAlign.Left);
 
             // telemetry: measure, then drop pairs from the left until the detail keeps some room
             int pairGap = PxI(6f);

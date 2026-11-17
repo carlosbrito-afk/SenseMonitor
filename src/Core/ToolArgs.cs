@@ -44,6 +44,8 @@ namespace Forja.Core
         public const int Declined = 3;
         // The performance test ran but could not confirm Dia a dia + fans on Automático at the end.
         public const int RestoreFailed = 4;
+        // The capability profile says this tool must not write to this notebook (not tested, other BIOS, not announced).
+        public const int Refused = 5;
 
         public static int ForPerf(PerfTestReport r)
         {

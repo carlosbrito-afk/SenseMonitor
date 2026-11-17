@@ -15,6 +15,10 @@ namespace Forja.App
     // page is active; while the window is hidden only the firmware tick does (2 s, or 12 s when
     // the fans are Automático: the pacer repeats the reading for each elapsed second), so the tray
     // app runs no extra timer.
+    //
+    // Live telemetry (CPU clock, power, throttle state, power plan; GPU usage/VRAM/clock/power/
+    // limit) comes from TelemetryHub as plain text (TelemetryView) shown in a two-line label under
+    // each readout. The hub owns the poller thread: this page only acquires it while it is active.
     public sealed class MonitorPage : Page
     {
         private const int StatsFreshMs = 2500;
@@ -37,7 +41,9 @@ namespace Forja.App
         private readonly NoteText cleanNote = new NoteText();
         private readonly FlatButton clean = new FlatButton();
         private readonly Timer sampler = new Timer();
-        private readonly StatsPoller poller;
+        private readonly TelemetryHub hub;
+        private readonly InfoText cpuInfo = new InfoText();
+        private readonly InfoText gpuInfo = new InfoText();
         private StatsSnapshot stats;
         private int statsAt;
         private bool active;
@@ -58,8 +64,10 @@ namespace Forja.App
 
             cpuPanel.Controls.Add(cpuGauge);
             cpuPanel.Controls.Add(cpuReadout);
+            cpuPanel.Controls.Add(cpuInfo);
             gpuPanel.Controls.Add(gpuGauge);
             gpuPanel.Controls.Add(gpuReadout);
+            gpuPanel.Controls.Add(gpuInfo);
             cpuChartPanel.Controls.Add(cpuChart);
             gpuChartPanel.Controls.Add(gpuChart);
 
@@ -76,7 +84,8 @@ namespace Forja.App
 
             sampler.Interval = 1000;
             sampler.Tick += delegate { Sample(); };
-            poller = new StatsPoller(OnStats);
+            hub = app.Telemetry;
+            hub.StatsArrived += OnStats;
             app.CleaningChanged += UpdateCleaning;
             UpdateCleaning();
             RefreshReadouts();
@@ -88,7 +97,7 @@ namespace Forja.App
             active = value;
             if (active)
             {
-                poller.Resume();
+                hub.Acquire(this, true);
                 sampler.Start();
                 Sample();
                 RefreshReadouts();
@@ -98,7 +107,7 @@ namespace Forja.App
             else
             {
                 sampler.Stop();
-                poller.Pause();
+                hub.Release(this);
                 stats = null; // stale numbers are not shown on the next open
             }
         }
@@ -107,7 +116,8 @@ namespace Forja.App
         {
             sampler.Stop();
             sampler.Dispose();
-            poller.Stop();
+            hub.Release(this);
+            hub.StatsArrived -= OnStats; // the hub itself is stopped by TrayApp.Cleanup
             app.CleaningChanged -= UpdateCleaning;
         }
 
@@ -174,8 +184,11 @@ namespace Forja.App
         {
             SensorReading r = app.Latest;
             double? gpuT = GpuTempFor(r);
+            TelemetryView tv = hub.CurrentView();
             cpuGauge.SetReading(r.CpuTempC, history.Peak(Hardware.Cpu, Metric.Temp), false);
-            gpuGauge.SetReading(gpuT, history.Peak(Hardware.Gpu, Metric.Temp), false);
+            gpuGauge.SetReading(gpuT, history.Peak(Hardware.Gpu, Metric.Temp), tv.GpuFirmwareOff); // "em repouso" only when the firmware sensor says the GPU is off
+            cpuInfo.SetInfo(tv.PowerContextLine == null ? tv.CpuLine : tv.CpuLine + Environment.NewLine + tv.PowerContextLine, ThrottleText.IsLimited(tv.Throttle));
+            gpuInfo.SetInfo(tv.GpuLine, false);
             FillReadout(cpuReadout, CpuUse(), r.CpuFanRpm, history.Peak(Hardware.Cpu, Metric.Temp));
             FillReadout(gpuReadout, GpuUse(), r.GpuFanRpm, history.Peak(Hardware.Gpu, Metric.Temp));
 
@@ -195,10 +208,10 @@ namespace Forja.App
         private void UpdateCleaning()
         {
             bool wasCleaning = !clean.Enabled;
-            clean.Enabled = !app.Cleaning;
+            clean.Enabled = !app.Cleaning && !app.ReadOnly;
             clean.Text = app.Cleaning ? "Limpando…" : "Limpar RAM";
-            cleanNote.Text = app.Cleaning ? "Isso pode levar alguns segundos" : app.LastCleanText;
-            if (wasCleaning && !app.Cleaning) poller.Kick(); // show the drop right away
+            cleanNote.Text = app.ReadOnly ? SafetyText.ReadOnlyShort : app.Cleaning ? "Isso pode levar alguns segundos" : app.LastCleanText;
+            if (wasCleaning && !app.Cleaning) hub.Kick(); // show the drop right away
         }
 
         // Logical layout of mockup D (860 px window): 14 px gutter, two 322 px columns, 12 px gaps.
@@ -211,14 +224,15 @@ namespace Forja.App
             int col = (w - gap) / 2;
             int y = pad;
 
-            int ih = Theme.S(154);
+            int infoH = Theme.S(30); // two lines of telemetry text under each readout
+            int ih = Theme.S(154) + infoH;
             cpuPanel.SetBounds(pad, y, col, ih);
             gpuPanel.SetBounds(pad + col + gap, y, w - col - gap, ih);
-            LayoutInstrument(cpuPanel, cpuGauge, cpuReadout);
-            LayoutInstrument(gpuPanel, gpuGauge, gpuReadout);
+            LayoutInstrument(cpuPanel, cpuGauge, cpuReadout, cpuInfo);
+            LayoutInstrument(gpuPanel, gpuGauge, gpuReadout, gpuInfo);
             y += ih + gap;
 
-            int ch = Theme.S(206);
+            int ch = Theme.S(206) - infoH;
             cpuChartPanel.SetBounds(pad, y, col, ch);
             gpuChartPanel.SetBounds(pad + col + gap, y, w - col - gap, ch);
             cpuChart.SetBounds(Theme.S(15), Theme.S(11), cpuChartPanel.Width - Theme.S(30), ch - Theme.S(18));
@@ -237,11 +251,52 @@ namespace Forja.App
             memory.SetBounds(Theme.S(15), Theme.S(13), Math.Max(Theme.S(60), noteX - Theme.S(18) - Theme.S(15)), Theme.S(MemoryMeter.LogicalHeight));
         }
 
-        private static void LayoutInstrument(PanelBox panel, InstrumentGauge gauge, InstrumentReadout readout)
+        private static void LayoutInstrument(PanelBox panel, InstrumentGauge gauge, InstrumentReadout readout, InfoText info)
         {
             int side = Theme.S(InstrumentGauge.LogicalSize);
             gauge.SetBounds(Theme.S(9), Theme.S(11), side, side);
             readout.SetBounds(Theme.S(153), Theme.S(11), Math.Max(Theme.S(40), panel.Width - Theme.S(168)), side);
+            int top = Theme.S(11) + side + Theme.S(3);
+            info.SetBounds(Theme.S(15), top, Math.Max(Theme.S(40), panel.Width - Theme.S(30)), Math.Max(Theme.S(16), panel.Height - top - Theme.S(3)));
+        }
+
+        // Up to two lines of live telemetry text (left aligned, ellipsized); amber while limited.
+        private sealed class InfoText : Control
+        {
+            private bool warn;
+
+            public InfoText()
+            {
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                    | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+                BackColor = Palette.Panel;
+                AccessibleRole = AccessibleRole.StaticText;
+            }
+
+            public void SetInfo(string text, bool limited)
+            {
+                text = text ?? "";
+                if (text == Text && limited == warn) return;
+                warn = limited;
+                Text = text;
+            }
+
+            protected override void OnTextChanged(EventArgs e)
+            {
+                base.OnTextChanged(e);
+                AccessibleName = Text;
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.Clear(BackColor);
+                if (string.IsNullOrEmpty(Text)) return;
+                Font f = Theme.Font(9f, false);
+                TextFormatFlags fl = TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis
+                    | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+                TextRenderer.DrawText(e.Graphics, Text, f, new Rectangle(0, 0, Width, Height), warn ? Palette.Warn : Palette.Sec, fl);
+            }
         }
 
         // Right-aligned, vertically centered result text of the RAM cleaner (up to two lines).

@@ -151,6 +151,9 @@ try {
     if ($regCode -ne 0) { Fail ('nao foi possivel registrar a tarefa (codigo ' + $regCode + '); veja %APPDATA%\SenseMonitor\erro.log') }
     [void](Invoke-Native $schtasks @('/Query', '/TN', 'SenseMonitor', '/XML'))
     $script:nativeOut | Where-Object { $_ -match '<Command>' } | ForEach-Object { Log ('  tarefa: ' + $_.Trim()) }
+    # the fan sentinel's own on-demand task (registered by the same --registrar-inicio)
+    [void](Invoke-Native $schtasks @('/Query', '/TN', 'SenseMonitor-Sentinela', '/XML'))
+    $script:nativeOut | Where-Object { $_ -match '<Command>|<Arguments>' } | ForEach-Object { Log ('  tarefa do guardiao: ' + $_.Trim()) }
 
     # 6. start through the task (elevated, no UAC prompt)
     if ($NoStart) { Log 'nao iniciado (-NoStart)'; Log '--- fim ---'; exit 0 }

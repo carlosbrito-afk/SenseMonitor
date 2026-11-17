@@ -10,14 +10,22 @@ namespace Forja.Core
 
         private static readonly CultureInfo Br = new CultureInfo("pt-BR");
 
-        public static string BlueScreens(int n)
+        // "1 reinício inesperado" / "3 reinícios inesperados"
+        public static string UnexpectedRestarts(int n)
         {
-            return n == 1 ? "1 tela azul" : n.ToString(Br) + " telas azuis";
+            return n == 1 ? "1 reinício inesperado" : n.ToString(Br) + " reinícios inesperados";
         }
 
-        public static string UnexpectedShutdowns(int n)
+        // "2 falhas do sistema, 1 travamento, 4 quedas de energia" (kinds with no entry are left out;
+        // an entry whose kind the log could not tell counts as "sem detalhes").
+        public static string RestartBreakdown(int system, int hang, int power, int unknown)
         {
-            return n == 1 ? "1 desligamento inesperado sem código" : n.ToString(Br) + " desligamentos inesperados sem código";
+            System.Collections.Generic.List<string> parts = new System.Collections.Generic.List<string>();
+            if (system > 0) parts.Add(system == 1 ? "1 falha do sistema" : system.ToString(Br) + " falhas do sistema");
+            if (hang > 0) parts.Add(hang == 1 ? "1 travamento" : hang.ToString(Br) + " travamentos");
+            if (power > 0) parts.Add(power == 1 ? "1 queda de energia" : power.ToString(Br) + " quedas de energia");
+            if (unknown > 0) parts.Add(unknown == 1 ? "1 sem detalhes" : unknown.ToString(Br) + " sem detalhes");
+            return string.Join(", ", parts.ToArray());
         }
 
         public static string Wh(int mWh)

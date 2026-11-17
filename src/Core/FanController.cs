@@ -45,6 +45,23 @@ namespace Forja.Core
         private const string StWatchdog = "o app ficou sem responder — automático";
 
         private readonly IFirmware _fw;
+
+        // ---- when Auto may be written (see AutoAssertEnabled), back-off and pause ----
+        private bool _autoAssert = true;
+        private bool _dirty;           // a Custom/Máximo write was attempted: the fans may be off Auto
+        private bool _backoffOn;
+        private int _autoFails;
+        private int _nextAutoTry;
+        private bool _failAlert;
+        private bool _failAlerted;
+        private bool _paused;
+        private bool _pausedHeat;
+        private Func<int> _clock;
+        private static readonly int[] BackoffMs = { 2000, 5000, 30000, 300000 };
+        public const string PausedNote = "o teste de ambiente está usando as ventoinhas — automático";
+        // The fans this notebook has (both until an environment profile says otherwise): the RPM guard
+        // judges only those.
+        private FanLayout _layout = FanLayout.Both;
         private FanUserMode _mode = FanUserMode.Auto;
         private int _manualCpu = Floor;
         private int _manualGpu = Floor;
@@ -93,17 +110,120 @@ namespace Forja.Core
             _fw = fw;
         }
 
+        // Why Manual/Curva/Máximo are not offered; the shell replaces it while read-only mode is on.
+        public string LockedNote = FanValidation.LockedNote;
+
+        // false = this notebook's fan control is not confirmed (untested, unknown, stale): the controller never
+        // writes Auto on its own (not at start, not on resume, not at exit) unless the app itself made the fans
+        // leave Auto (a Custom write was attempted, or MarkDirty). Default true (confirmed machine).
+        public bool AutoAssertEnabled
+        {
+            get { return _autoAssert; }
+            set { _autoAssert = value; }
+        }
+
+        // The "Máximo" option writes outside the controller: after it the fans must be handed back.
+        public void MarkDirty()
+        {
+            _dirty = true;
+        }
+
+        // Anything the firmware may need handed back at exit or suspend (read from any thread).
+        public bool MayNeedHandBack
+        {
+            get { return _autoAssert || _dirty; }
+        }
+
+        // Failed Auto writes are retried after 2 s, 5 s, 30 s, then every 5 min (instead of every tick), with one
+        // alert (TakeAutoFailAlert). Urgent writes (exit, suspend, heat, a failed Custom write) ignore it. Off by
+        // default so the pure tests keep their immediate retry; the app turns it on.
+        public bool BackoffEnabled
+        {
+            get { return _backoffOn; }
+            set { _backoffOn = value; }
+        }
+
+        public Func<int> Clock
+        {
+            get { return _clock; }
+            set { _clock = value; }
+        }
+
+        private int Now()
+        {
+            return _clock != null ? _clock() : Environment.TickCount;
+        }
+
+        // true once per series of failures: the shell journals it / tells the user.
+        public bool TakeAutoFailAlert()
+        {
+            bool a = _failAlert;
+            _failAlert = false;
+            return a;
+        }
+
+        private bool BackoffBlocks()
+        {
+            return _backoffOn && _autoFails > 0 && unchecked(Now() - _nextAutoTry) < 0;
+        }
+
+        private void RegisterAutoFail()
+        {
+            if (!_backoffOn) return;
+            _autoFails++;
+            _nextAutoTry = unchecked(Now() + BackoffMs[Math.Min(_autoFails - 1, BackoffMs.Length - 1)]);
+            if (!_failAlerted)
+            {
+                _failAlerted = true;
+                _failAlert = true;
+            }
+        }
+
+        public bool Paused { get { return _paused; } }
+
+        // While the environment wizard owns the firmware: the controller hands the fans back to Auto once and then
+        // writes nothing (no retries, no re-asserts) except an Auto at 90 C, once per heat event. Choosing Manual,
+        // Curva or Máximo meanwhile stays in Auto with a note.
+        public void SetPaused(bool paused)
+        {
+            if (_paused == paused) return;
+            _paused = paused;
+            _pausedHeat = false;
+            if (paused)
+            {
+                if (_mode != FanUserMode.Auto)
+                {
+                    _mode = FanUserMode.Auto;
+                    EnterAuto(PausedNote, true);
+                }
+                else
+                {
+                    _notice = PausedNote;
+                    _status = PausedNote;
+                    _warning = true;
+                }
+                return;
+            }
+            _notice = null;
+            if (_fwAuto)
+            {
+                _status = StAuto;
+                _warning = false;
+            }
+        }
+
         public FanUserMode Mode
         {
             get { return _mode; }
             set
             {
                 _notice = null;
-                if (value != FanUserMode.Auto && !_validated)
+                if (value != FanUserMode.Auto && (!_validated || _paused))
                 {
+                    string why = _paused ? PausedNote : LockedNote;
                     _mode = FanUserMode.Auto;
-                    if (!_suspended && !_awaitingFresh) EnterAuto(FanValidation.LockedNote, false);
-                    else _notice = FanValidation.LockedNote;
+                    if (!_suspended && !_awaitingFresh) EnterAuto(why, false);
+                    else _notice = why;
                     return;
                 }
                 if (value == FanUserMode.Curve && !_curveAvailable)
@@ -158,8 +278,8 @@ namespace Forja.Core
                 if (!value && _mode != FanUserMode.Auto)
                 {
                     _mode = FanUserMode.Auto;
-                    if (!_suspended && !_awaitingFresh && !_shutdown) EnterAuto(FanValidation.LockedNote, true);
-                    else _notice = FanValidation.LockedNote;
+                    if (!_suspended && !_awaitingFresh && !_shutdown) EnterAuto(LockedNote, true);
+                    else _notice = LockedNote;
                 }
             }
         }
@@ -173,7 +293,19 @@ namespace Forja.Core
             _guardTick = -1;
         }
 
-        public bool RpmGuardEnabled { get { return _maxRpmCpu > 0 && _maxRpmGpu > 0; } }
+        public bool RpmGuardEnabled
+        {
+            get { return (!_layout.Cpu || _maxRpmCpu > 0) && (!_layout.Gpu || _maxRpmGpu > 0); }
+        }
+
+        // The fans the notebook has (null = both). The page and the guard follow it.
+        public void SetFanLayout(FanLayout layout)
+        {
+            _layout = layout ?? FanLayout.Both;
+            _guardTick = -1;
+        }
+
+        public FanLayout Layout { get { return _layout; } }
 
         public string Status { get { return _status; } }
 
@@ -235,6 +367,22 @@ namespace Forja.Core
             double? cpu = r == null ? null : Valid(r.CpuTempC);
             double? gpu = r == null ? null : Valid(r.GpuTempC);
 
+            if (_paused)
+            {
+                // Nothing is written while the wizard owns the firmware, except Auto at 90 C (once per heat event).
+                double? hot = Max(cpu, gpu);
+                if (hot.HasValue && hot.Value >= HotOn && !_pausedHeat)
+                {
+                    _pausedHeat = true;
+                    EnterAuto(StThermalAuto, true);
+                }
+                else if (!hot.HasValue || hot.Value < HotOff)
+                {
+                    _pausedHeat = false;
+                }
+                return;
+            }
+
             if (cpu.HasValue)
             {
                 _nullReads = 0;
@@ -249,7 +397,7 @@ namespace Forja.Core
             if (_awaitingFresh)
             {
                 // Firmware must be in Auto while waiting; retry if not confirmed.
-                if (!_fwAuto) EnterAuto(StResume, true);
+                if (!_fwAuto && !BackoffBlocks()) EnterAuto(StResume, true);
                 if (!cpu.HasValue) return;
                 _awaitingFresh = false;
                 _notice = null;
@@ -258,7 +406,8 @@ namespace Forja.Core
 
             if (_mode == FanUserMode.Auto)
             {
-                // Firmware in charge; only retry a previously failed SetFanAuto.
+                // Firmware in charge; only retry a previously failed SetFanAuto (with back-off, when on).
+                if (!_fwAuto && BackoffBlocks()) return;
                 EnterAuto(_notice, !_fwAuto);
                 return;
             }
@@ -325,7 +474,8 @@ namespace Forja.Core
             {
                 wantCpu = Clamp(_manualCpu);
                 wantGpu = Clamp(_manualGpu);
-                status = "Manual: CPU " + wantCpu + "% / GPU " + wantGpu + "%";
+                status = _layout.Count == 2 ? "Manual: CPU " + wantCpu + "% / GPU " + wantGpu + "%"
+                    : "Manual: " + (_layout.Cpu ? wantCpu : wantGpu) + "%";
             }
             else
             {
@@ -342,6 +492,7 @@ namespace Forja.Core
 
             if (_fwAuto || wantCpu != _lastCpu || wantGpu != _lastGpu)
             {
+                _dirty = true;
                 bool ok = _fw.SetFanPercent(wantCpu, wantGpu);
                 if (!ok)
                 {
@@ -390,8 +541,27 @@ namespace Forja.Core
         {
             if (force || !_fwAuto)
             {
-                _fwAuto = _fw.SetFanAuto();
-                if (_fwAuto) _autoWrites++;
+                if (_autoAssert || _dirty)
+                {
+                    _fwAuto = _fw.SetFanAuto();
+                    if (_fwAuto)
+                    {
+                        _autoWrites++;
+                        _dirty = false;
+                        _autoFails = 0;
+                        _failAlerted = false;
+                    }
+                    else
+                    {
+                        RegisterAutoFail();
+                    }
+                }
+                else
+                {
+                    // Fan control of this notebook is not confirmed and the app never left Auto: the firmware is in
+                    // charge, there is nothing to assert or hand back (and no write to a model we have not proved).
+                    _fwAuto = true;
+                }
             }
             _warning = !_fwAuto || notice != null;
             _lastCpu = -1;
@@ -414,8 +584,8 @@ namespace Forja.Core
             }
             _guardRefCpu = r == null ? null : r.CpuFanRpm;
             _guardRefGpu = r == null ? null : r.GpuFanRpm;
-            _guardCpuOk = RpmGuard.InBand(_guardRefCpu, _lastCpu, _maxRpmCpu);
-            _guardGpuOk = RpmGuard.InBand(_guardRefGpu, _lastGpu, _maxRpmGpu);
+            _guardCpuOk = !_layout.Cpu || RpmGuard.InBand(_guardRefCpu, _lastCpu, _maxRpmCpu);
+            _guardGpuOk = !_layout.Gpu || RpmGuard.InBand(_guardRefGpu, _lastGpu, _maxRpmGpu);
             _guardTick = (_guardCpuOk && _guardGpuOk) ? -1 : 0;
         }
 

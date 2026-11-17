@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -6,12 +7,13 @@ using Forja.Core;
 
 namespace Forja.App
 {
-    // Modes page: three large buttons (Silencioso / Dia a dia / Desempenho).
+    // Modes page: one large button per mode the environment test confirmed (up to five).
     // Self-contained: the shell supplies delegates; call RefreshState() when the page is
     // shown and whenever the firmware mode may have changed.
     public class ModesPage : UserControl
     {
-        public const string WarningText = "Este modo pode deixar o PC instável. Se voltar a dar tela azul, volte para Dia a dia.";
+        public const string WarningText = "Este modo pode deixar o PC instável. Se isso acontecer, volte para Dia a dia.";
+        public const string TurboWarningText = "O Turbo leva o notebook ao limite: muito mais barulho e calor. Use o carregador, com a bateria instalada. Se ficar instável, volte para Dia a dia.";
         public const string FailureText = "Não foi possível trocar o modo";
 
         private readonly Func<PerfMode?> getMode;
@@ -19,9 +21,13 @@ namespace Forja.App
         private readonly Func<bool> perfWarningShown;
         private readonly Action markPerfWarningShown;
 
-        private readonly ModeCard[] cards = new ModeCard[3];
+        // One card per mode the environment test confirmed (SetOffers); none when the notebook has not been tested.
+        private readonly List<ModeCard> cards = new List<ModeCard>();
+        private string offersNote;
         private readonly PlainLabel title;
         private readonly PlainLabel message;
+        private readonly PlainLabel proof;
+        private readonly PlainLabel caption;
         private readonly Font titleFont;
         private readonly Font messageFont;
         private bool busy;
@@ -29,6 +35,13 @@ namespace Forja.App
         // Confirms the one-time Desempenho warning. Default: a modal OK/Cancel box.
         // Return true to proceed (and mark the warning as shown).
         public Func<string, bool> ConfirmWarning;
+
+        // Non-null text = the cards are disabled and this is why (read-only mode). Null/absent = enabled.
+        public Func<string> LockedReason;
+
+        // Data under the cards (last teste-desempenho numbers per mode, proof of the last switch).
+        // Null/absent = the cards show only their description.
+        public Func<ModesView> ViewSource;
 
         public ModesPage(Func<PerfMode?> getMode, Func<PerfMode, bool> setMode,
             Func<bool> perfWarningShown, Action markPerfWarningShown)
@@ -61,21 +74,17 @@ namespace Forja.App
             message.ForeColor = FanPageColors.Sec;
             Controls.Add(message);
 
-            string[] names = { "Silencioso", "Dia a dia", "Desempenho (Gaming)" };
-            string[] descs =
-            {
-                "Ventoinhas baixas e menos ruído, para tarefas leves.",
-                "Equilíbrio entre desempenho e ruído para o uso normal.",
-                "Máximo desempenho, com mais ruído e calor."
-            };
-            PerfMode[] modes = { PerfMode.Silencioso, PerfMode.DiaADia, PerfMode.Desempenho };
-            for (int i = 0; i < 3; i++)
-            {
-                ModeCard c = new ModeCard(modes[i], names[i], descs[i]);
-                c.Click += OnCardClick;
-                cards[i] = c;
-                Controls.Add(c);
-            }
+            proof = new PlainLabel();
+            proof.Font = messageFont;
+            proof.ForeColor = FanPageColors.Text;
+            proof.Wrap = true;
+            Controls.Add(proof);
+
+            caption = new PlainLabel();
+            caption.Font = messageFont;
+            caption.ForeColor = FanPageColors.Mute;
+            caption.Wrap = true;
+            Controls.Add(caption);
 
             Padding = new Padding(0);
             Size = new Size(640, 420);
@@ -101,7 +110,7 @@ namespace Forja.App
         {
             base.OnLayout(e);
             // Called while the constructor is still adding controls.
-            if (cards[2] == null) return;
+            if (message == null) return;
             int pad = S(14);
             int w = Math.Max(10, ClientSize.Width - pad * 2);
             int y = pad;
@@ -113,12 +122,49 @@ namespace Forja.App
             y += mh + S(14);
 
             int gap = S(12);
-            int cw = (w - gap * 2) / 3;
-            int ch = Math.Min(S(190), Math.Max(S(120), ClientSize.Height - y - pad));
-            for (int i = 0; i < 3; i++)
+            int n = cards.Count;
+            if (n == 0) return;
+            int cols = n <= 3 ? n : 3;
+            int rows = (n + cols - 1) / cols;
+            int cw = (w - gap * (cols - 1)) / cols;
+            int ph = mh * 2 + S(2);
+            // room below the cards for the proof of the last switch and the benchmark caption
+            int reserve = ph * 2 + S(4) + S(14);
+            int avail = ClientSize.Height - y - pad - reserve;
+            int ch = Math.Min(S(190), Math.Max(S(96), (avail - gap * (rows - 1)) / rows));
+            for (int i = 0; i < n; i++)
             {
-                cards[i].SetBounds(pad + i * (cw + gap), y, cw, ch);
+                cards[i].SetBounds(pad + (i % cols) * (cw + gap), y + (i / cols) * (ch + gap), cw, ch);
             }
+            y += rows * ch + (rows - 1) * gap + S(14);
+            proof.SetBounds(pad, y, w, ph);
+            y += ph + S(4);
+            caption.SetBounds(pad, y, w, ph);
+        }
+
+        // The modes this notebook offers (confirmed by the environment test), in display order. note explains
+        // why the list is empty (never tested, another BIOS, not an Acer, read-only mode).
+        public void SetOffers(IList<PerfMode> offered, string note)
+        {
+            foreach (ModeCard c in cards)
+            {
+                Controls.Remove(c);
+                c.Dispose();
+            }
+            cards.Clear();
+            if (offered != null)
+            {
+                foreach (PerfMode m in offered)
+                {
+                    ModeCard c = new ModeCard(m, ModeCatalog.CardName(m), ModeCatalog.Description(m));
+                    c.Click += OnCardClick;
+                    cards.Add(c);
+                    Controls.Add(c);
+                }
+            }
+            offersNote = note;
+            PerformLayout();
+            RefreshState();
         }
 
         // Re-reads the firmware mode and repaints.
@@ -131,15 +177,36 @@ namespace Forja.App
             {
                 c.Active = cur.HasValue && cur.Value == c.Mode;
             }
-            if (cur.HasValue) SetMessage("Modo atual: " + NameOf(cur.Value), FanPageColors.Sec);
-            else SetMessage("Modo atual indisponível", FanPageColors.Mute);
+            string locked = Locked();
+            foreach (ModeCard c in cards) c.Enabled = locked == null;
+            string head = cur.HasValue ? "Modo atual: " + NameOf(cur.Value) : "Modo atual indisponível";
+            if (cards.Count == 0) SetMessage(offersNote ?? "Nenhum modo liberado neste notebook.", FanPageColors.Warn);
+            else if (locked != null) SetMessage(head + ". " + locked, FanPageColors.Warn);
+            else if (cur.HasValue) SetMessage(head, FanPageColors.Sec);
+            else SetMessage(head, FanPageColors.Mute);
+            RefreshInsights();
+        }
+
+        // Benchmark numbers on the cards and the proof of the last switch; cheap, safe to call every tick.
+        public void RefreshInsights()
+        {
+            ModesView v = null;
+            Func<ModesView> src = ViewSource;
+            if (src != null)
+            {
+                try { v = src(); }
+                catch (Exception) { v = null; }
+            }
+            // each card shows ITS mode's line (the page has up to five cards, the view is keyed by mode)
+            foreach (ModeCard c in cards) c.Detail = v == null ? null : v.LineFor(c.Mode);
+            proof.Text = v == null ? "" : (v.EffectLine ?? "Última troca de modo: nenhuma nesta sessão.");
+            caption.Text = v == null ? ""
+                : "Teste de desempenho: " + v.Caption + (v.Caption == PerfScoreboard.NoMeasurement ? " (rode SenseMonitor.exe --teste-desempenho)" : "");
         }
 
         private static string NameOf(PerfMode m)
         {
-            if (m == PerfMode.Silencioso) return "Silencioso";
-            if (m == PerfMode.Desempenho) return "Desempenho (Gaming)";
-            return "Dia a dia";
+            return ModeCatalog.CardName(m);
         }
 
         private void SetMessage(string text, Color color)
@@ -159,18 +226,32 @@ namespace Forja.App
         public void Choose(PerfMode mode)
         {
             if (busy) return;
+            if (!cards.Exists(delegate(ModeCard c) { return c.Mode == mode; }))
+            {
+                // Only the modes the environment test confirmed can be chosen (a stale tray menu, a hotkey).
+                RefreshState();
+                return;
+            }
+            if (Locked() != null)
+            {
+                RefreshState();
+                return;
+            }
             busy = true;
             try
             {
-                if (mode == PerfMode.Desempenho && !perfWarningShown())
+                // Desempenho warns once; Turbo warns EVERY time (it pushes the notebook to its limit).
+                bool needsWarning = mode == PerfMode.Turbo || (mode == PerfMode.Desempenho && !perfWarningShown());
+                if (needsWarning)
                 {
-                    bool go = ConfirmWarning != null ? ConfirmWarning(WarningText) : DefaultConfirm(WarningText);
+                    string text = mode == PerfMode.Turbo ? TurboWarningText : WarningText;
+                    bool go = ConfirmWarning != null ? ConfirmWarning(text) : DefaultConfirm(text);
                     if (!go)
                     {
                         RefreshState();
                         return;
                     }
-                    markPerfWarningShown();
+                    if (mode == PerfMode.Desempenho) markPerfWarningShown();
                 }
                 bool ok;
                 try { ok = setMode(mode); }
@@ -182,6 +263,12 @@ namespace Forja.App
             {
                 busy = false;
             }
+        }
+
+        private string Locked()
+        {
+            Func<string> f = LockedReason;
+            return f == null ? null : f();
         }
 
         private bool DefaultConfirm(string text)
@@ -201,6 +288,8 @@ namespace Forja.App
             private readonly Font nameFont;
             private readonly Font descFont;
             private readonly Font tagFont;
+            private readonly Font detailFont;
+            private string detail;
             private bool active;
             private bool hover;
             private bool pressed;
@@ -216,6 +305,7 @@ namespace Forja.App
                 nameFont = FanPageColors.Ui(13f, FontStyle.Bold);
                 descFont = FanPageColors.Ui(9.5f, FontStyle.Regular);
                 tagFont = FanPageColors.Ui(8.5f, FontStyle.Bold);
+                detailFont = FanPageColors.Ui(9f, FontStyle.Regular);
                 TabStop = true;
                 Cursor = Cursors.Hand;
                 AccessibleName = name;
@@ -229,8 +319,16 @@ namespace Forja.App
                     nameFont.Dispose();
                     descFont.Dispose();
                     tagFont.Dispose();
+                    detailFont.Dispose();
                 }
                 base.Dispose(disposing);
+            }
+
+            // Measured data line (benchmark numbers), drawn under the description.
+            public string Detail
+            {
+                get { return detail; }
+                set { if (detail != value) { detail = value; Invalidate(); } }
             }
 
             public bool Active
@@ -290,8 +388,8 @@ namespace Forja.App
                 TextFormatFlags tf = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
                 int pad = S(16);
                 int w = Width - pad * 2;
-                Color nameColor = FanPageColors.Text;
-                Color descColor = FanPageColors.Sec;
+                Color nameColor = Enabled ? FanPageColors.Text : FanPageColors.Mute;
+                Color descColor = Enabled ? FanPageColors.Sec : FanPageColors.Mute;
 
                 int y = pad;
                 // Tag row: "ATIVO" on the current mode.
@@ -319,8 +417,16 @@ namespace Forja.App
                 y += nh + S(8);
 
                 int dh = Math.Max(descFont.Height, Height - y - pad);
-                TextRenderer.DrawText(g, desc, descFont, new Rectangle(pad, y, w, dh), descColor,
-                    TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+                TextFormatFlags descFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis;
+                TextRenderer.DrawText(g, desc, descFont, new Rectangle(pad, y, w, dh), descColor, descFlags);
+                if (!string.IsNullOrEmpty(detail))
+                {
+                    int used = Math.Min(dh, TextRenderer.MeasureText(g, desc, descFont, new Size(w, int.MaxValue), descFlags).Height);
+                    int dy = y + used + S(8);
+                    int remain = Height - dy - pad;
+                    if (remain >= detailFont.Height)
+                        TextRenderer.DrawText(g, detail, detailFont, new Rectangle(pad, dy, w, remain), Enabled ? FanPageColors.Text : FanPageColors.Mute, descFlags);
+                }
 
                 if (Focused && ShowFocusCues)
                 {

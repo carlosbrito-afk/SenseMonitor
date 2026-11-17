@@ -25,6 +25,13 @@ namespace Forja.Core
         public const byte ProfileQuiet = 0x00;
         public const byte ProfileBalanced = 0x01;
         public const byte ProfilePerformance = 0x04;
+        public const byte ProfileTurbo = 0x05;
+        public const byte ProfileEco = 0x06;
+
+        // Get* inputs of the read-only capability probe (docs6-11-17-pesquisa-modelos-acer.md, 4.1):
+        // GetGamingSysInfo(0) = bitmap of sensors; GetGamingMiscSetting(0x0A) = bitmap of profiles.
+        public const uint SysInfoSensorBitmap = 0x00;
+        public const uint MiscProfileBitmap = 0x0A;
 
         public const byte FanCpu = 0x01;
         public const byte FanGpu = 0x04;
@@ -57,8 +64,18 @@ namespace Forja.Core
 
         public static ulong FanBehavior(FanMode cpu, FanMode gpu)
         {
-            return FanBehaviorCpuBit | FanBehaviorGpuBit
-                | ((ulong)(int)cpu << 16) | ((ulong)(int)gpu << 22);
+            return FanBehavior(cpu, gpu, FanLayout.Both);
+        }
+
+        // Only the fans the notebook has: CPU = bit 0 (mode at << 16), GPU = bit 3 (mode at << 22).
+        // Both = the codes confirmed on this machine (Auto 0x410009, Max 0x820009, Custom 0xC30009).
+        public static ulong FanBehavior(FanMode cpu, FanMode gpu, FanLayout layout)
+        {
+            if (layout == null) layout = FanLayout.Both;
+            ulong v = 0;
+            if (layout.Cpu) v |= FanBehaviorCpuBit | ((ulong)(int)cpu << 16);
+            if (layout.Gpu) v |= FanBehaviorGpuBit | ((ulong)(int)gpu << 22);
+            return v;
         }
 
         // GetGamingFanBehavior input that asks for both fans (mask CPU | GPU).
@@ -77,6 +94,29 @@ namespace Forja.Core
             if (c < 1 || c > 3 || g < 1 || g > 3) return false;
             cpu = (FanMode)c;
             gpu = (FanMode)g;
+            return true;
+        }
+
+        // GetGamingFanBehavior input that asks only for the fans of the layout (never 0: the firmware answers
+        // status 2). null = both, as always.
+        public static uint FanBehaviorQueryFor(FanLayout layout)
+        {
+            if (layout == null) return FanBehaviorQuery;
+            return (uint)((layout.Cpu ? FanBehaviorCpuBit : 0UL) | (layout.Gpu ? FanBehaviorGpuBit : 0UL));
+        }
+
+        // Read-back for a notebook with the given fans: only those fields are judged. The mode of a fan the
+        // layout does not have mirrors the other one, so a caller that compares "both fans" keeps working.
+        public static bool DecodeFanBehavior(ulong raw, FanLayout layout, out FanMode? cpu, out FanMode? gpu)
+        {
+            if (layout == null || layout == FanLayout.Both) return DecodeFanBehavior(raw, out cpu, out gpu);
+            cpu = null;
+            gpu = null;
+            if ((raw & 0xFF) != 0) return false;
+            int v = layout.Cpu ? (int)((raw >> 8) & 0x3F) : (int)((raw >> 14) & 0x3F);
+            if (v < 1 || v > 3) return false;
+            cpu = (FanMode)v;
+            gpu = (FanMode)v;
             return true;
         }
 

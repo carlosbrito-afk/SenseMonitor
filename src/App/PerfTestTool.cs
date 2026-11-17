@@ -84,6 +84,23 @@ namespace Forja.App
             }
             try
             {
+                // The capability profile decides whether this test may switch the modes of THIS notebook at all.
+                Config gateCfg;
+                if (Config.TryLoad(Config.DefaultPath, out gateCfg) != ConfigRead.Ok) gateCfg = new Config();
+                DetectionRaw id = null;
+                try { id = EnvProbe.ReadIdentity(); }
+                catch (Exception) { id = null; }
+                Safety.Fingerprint = MachineFingerprint.Make(id == null ? null : id.Model, id == null ? null : id.Bios);
+                string refusal = EnvGate.ForModeTool(gateCfg, id == null ? null : id.Model, id == null ? null : id.Bios, EnvSession.NowUtc());
+                if (refusal != null)
+                {
+                    Program.LogLine("Teste de desempenho recusado: " + refusal);
+                    if (unattended) TryWriteNotRun("Teste de desempenho NÃO executado em " + DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC: " + refusal);
+                    else MessageBox.Show(refusal, Caption, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return ToolExit.Refused;
+                }
+                FanLayoutStore.Set(gateCfg.EnvFanLayout);
+
                 if (!unattended)
                 {
                     PerfPower power = PerfProbe.ReadPower();
@@ -183,7 +200,8 @@ namespace Forja.App
         private static Outcome Execute(bool unattended, ToolProgressForm form)
         {
             Outcome o = new Outcome();
-            WmiFirmware fw = null;
+            GuardedFirmware fw = null;
+            HeartbeatPump pump = null;
             PerfLoad load = null;
             PerfProbe probe = null;
             HeatWatchdog watchdog = null;
@@ -193,6 +211,16 @@ namespace Forja.App
             KeepAwake.Begin();
             try
             {
+                // The test changes the performance mode and the fans: not in diagnostic read-only mode.
+                // Its writes go through the guard (journal, fan marker) and the fan sentinel guards it.
+                Safety.ReadOnly = Safety.ReadOnlyRequestedFromDisk();
+                if (Safety.ReadOnly)
+                {
+                    o.Error = "O modo diagnóstico (somente leitura) está ligado: o teste muda o modo e as ventoinhas. Desligue-o em Configurações (ou tire --somente-leitura) e tente de novo.";
+                    return o;
+                }
+                Safety.EnsureSentinel = Sentinel.EnsureRunning;
+                pump = new HeartbeatPump();
                 string journalPath = PerfJournalFile.DefaultPath();
                 string crashNote = PerfJournalFile.PreviousCrashNote(journalPath);
                 PerfJournalFile.TrimToRecent(journalPath);
@@ -209,7 +237,7 @@ namespace Forja.App
                     return o;
                 }
 
-                fw = new WmiFirmware();
+                fw = Safety.Wrap(new WmiFirmware());
                 if (!fw.Available)
                 {
                     o.Error = "O firmware não respondeu (o app precisa estar como administrador).";
@@ -233,12 +261,12 @@ namespace Forja.App
                 activeLoad = load;
                 Stopwatch clock = Stopwatch.StartNew();
                 Func<long> now = delegate { return clock.ElapsedMilliseconds; };
-                WmiFirmware guardFw = null; // used by the watchdog's reader thread only
+                GuardedFirmware guardFw = null; // used by the watchdog's reader thread only (reads only)
                 PerfLoad guardLoad = load;
                 watchdog = new HeatWatchdog(
                     delegate
                     {
-                        if (guardFw == null) guardFw = new WmiFirmware();
+                        if (guardFw == null) guardFw = Safety.Wrap(new WmiFirmware());
                         return guardFw.ReadSensors();
                     },
                     delegate { guardLoad.RequestStop(); },
@@ -277,6 +305,7 @@ namespace Forja.App
                     catch (Exception) { }
                 }
                 KeepAwake.End();
+                if (pump != null) pump.Dispose();
                 Program.PerfTesting = false;
             }
             return o;

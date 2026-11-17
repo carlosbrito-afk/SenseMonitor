@@ -295,7 +295,7 @@ namespace Forja.Tests
             Assert.Equal("0 dias", InstrumentMath.Days(-3));
         }
 
-        // ---- stability ("sem tela azul") ---------------------------------------------------
+        // ---- whole days ---------------------------------------------------------------------
 
         [Test]
         public static void WholeDaysBetween_FloorsAndNeverNegative()
@@ -305,15 +305,6 @@ namespace Forja.Tests
             Assert.Equal(1, InstrumentMath.WholeDaysBetween(since, new DateTime(2026, 11, 16, 22, 12, 59)));
             Assert.Equal(0, InstrumentMath.WholeDaysBetween(since, new DateTime(2026, 11, 15, 8, 0, 0)));
             Assert.Equal(0, InstrumentMath.WholeDaysBetween(since, new DateTime(2026, 11, 13, 8, 0, 0)));
-        }
-
-        [Test]
-        public static void NoCrashSummary_ForTheVerdictStrip()
-        {
-            Assert.Equal("Sem tela azul há 2 dias", InstrumentMath.NoCrashSummary(2));
-            Assert.Equal("Sem tela azul há 1 dia", InstrumentMath.NoCrashSummary(1));
-            Assert.Equal("Sem tela azul há menos de 1 dia", InstrumentMath.NoCrashSummary(0));
-            Assert.Equal("Sem dados de tela azul", InstrumentMath.NoCrashSummary(null));
         }
 
         // ---- accessibility text ----------------------------------------------------------

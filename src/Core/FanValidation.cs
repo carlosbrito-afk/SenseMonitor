@@ -56,6 +56,12 @@ namespace Forja.Core
             c.FanValidationUtc = utc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
             c.FanValidationNotes = Summary() + " | amostras: " + string.Join(" ", Raw.ToArray());
             if (!Passed && c.FanMode != "Auto") c.FanMode = "Auto";
+            // The environment profile (if any) follows: an interrupted run proves nothing (locked), a failed one is a no.
+            if (c.Env != null)
+            {
+                c.Env.Set(Cap.FanControl, Passed ? CapState.Confirmed : (Aborted ? CapState.Untested : CapState.Unavailable),
+                    Passed ? "As ventoinhas seguiram os comandos no teste." : (Reason ?? "As ventoinhas não seguiram os comandos no teste."));
+            }
         }
     }
 
@@ -70,6 +76,18 @@ namespace Forja.Core
             c.ModeCheckPassed = Passed;
             c.ModeCheckUtc = utc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
             c.ModeCheckNotes = (Passed ? "Modos: APROVADO" : "Modos: REPROVADO") + " | " + string.Join("; ", Lines.ToArray());
+            // The environment profile (if any) follows for the three modes this check covers.
+            if (c.Env != null)
+            {
+                PerfMode[] covered = { PerfMode.Silencioso, PerfMode.DiaADia, PerfMode.Desempenho };
+                foreach (PerfMode m in covered)
+                {
+                    Cap cap = ModeCatalog.CapOf(m);
+                    if (c.Env.State(cap) == CapState.Unavailable) continue;
+                    c.Env.Set(cap, Passed ? CapState.Confirmed : CapState.Untested,
+                        Passed ? "O modo foi trocado e confirmado na leitura de volta." : "O teste de modos não passou: bloqueado até um novo teste.");
+                }
+            }
         }
     }
 
@@ -164,6 +182,30 @@ namespace Forja.Core
         }
     }
 
+    // One progress report of the fan test.
+    public sealed class FanProgress
+    {
+        // "auto" (baseline), "pct" (Custom), "max", "auto2" (back to Automático).
+        public string Phase;
+        public int ElapsedMs;
+        public int TotalMs;
+        public int Percent;
+        public int? CpuRpm;
+        public int? GpuRpm;
+        public string Text;
+
+        public static string TextFor(string phase, int pct)
+        {
+            switch (phase)
+            {
+                case "auto": return "Medindo o ruído normal das ventoinhas, no automático. Escute: é o som de referência.";
+                case "pct": return "Ventoinhas a " + pct.ToString(CultureInfo.InvariantCulture) + "%. Escute: o som deve mudar em relação ao automático.";
+                case "max": return "Ventoinhas no máximo. Escute: o barulho deve subir bastante.";
+                default: return "Voltando ao automático. Escute: o barulho deve ir baixando aos poucos.";
+            }
+        }
+    }
+
     // The validation routine (run with the user present: SenseMonitor.exe --validar-ventoinha).
     // Fans: Automático (baseline) -> Custom pct% -> Máximo -> Automático, ~8 s each, sampling the
     // RPM every second. Any refused write, a temperature >= 90 °C or an exception stops it and
@@ -178,12 +220,27 @@ namespace Forja.Core
         public const int ModePauseMs = 1500;
         public const double AbortTempC = 90;
 
+        // Total of the sleeps of RunFans (the progress bar's scale): settle + baseline + custom + max + 2 x auto.
+        public const int TotalMs = SettleMs + BaselineMs + PhaseMs + PhaseMs + 2 * PhaseMs;
+
         private readonly IFirmware fw;
         private readonly Func<bool> setFanMax;
         private readonly Action<int> sleep;
         private readonly int pct;
+        private readonly FanLayout layout;
+        private int elapsedMs;
+
+        // Optional: told about every sample (the wizard's progress bar and "listen to the fans" text).
+        // A callback that throws never breaks the test.
+        public Action<FanProgress> Progress;
 
         public FanValidationRunner(IFirmware fw, Func<bool> setFanMax, Action<int> sleep, int pct)
+            : this(fw, setFanMax, sleep, pct, FanLayout.Both)
+        {
+        }
+
+        // layout: the fans this notebook has. Only those are judged and need a temperature.
+        public FanValidationRunner(IFirmware fw, Func<bool> setFanMax, Action<int> sleep, int pct, FanLayout layout)
         {
             if (fw == null) throw new ArgumentNullException("fw");
             if (setFanMax == null) throw new ArgumentNullException("setFanMax");
@@ -192,6 +249,7 @@ namespace Forja.Core
             this.setFanMax = setFanMax;
             this.sleep = sleep;
             this.pct = pct < Codes.MinFanPct ? Codes.MinFanPct : (pct > 90 ? 90 : pct);
+            this.layout = layout ?? FanLayout.Both;
         }
 
         private class Phase
@@ -225,6 +283,7 @@ namespace Forja.Core
         {
             FanValidationReport rep = new FanValidationReport();
             rep.TestPct = pct;
+            elapsedMs = 0;
             bool autoConfirmed = false;
             Phase baseline = new Phase(), custom = new Phase(), max = new Phase(), again = new Phase();
             try
@@ -232,6 +291,7 @@ namespace Forja.Core
                 CheckCancel();
                 if (!fw.SetFanAuto()) throw new AbortException("o firmware recusou o modo automático");
                 sleep(SettleMs);
+                elapsedMs += SettleMs;
                 Sample("auto", baseline, BaselineMs, rep);
 
                 autoConfirmed = false;
@@ -267,9 +327,9 @@ namespace Forja.Core
                 }
             }
             if (rep.Aborted) return rep;
-            rep.Cpu = FanValidation.EvaluateFan("CPU", baseline.Cpu, custom.Cpu, max.Cpu, again.Cpu, pct);
-            rep.Gpu = FanValidation.EvaluateFan("GPU", baseline.Gpu, custom.Gpu, max.Gpu, again.Gpu, pct);
-            rep.Passed = rep.Cpu.Passed && rep.Gpu.Passed;
+            if (layout.Cpu) rep.Cpu = FanValidation.EvaluateFan("CPU", baseline.Cpu, custom.Cpu, max.Cpu, again.Cpu, pct);
+            if (layout.Gpu) rep.Gpu = FanValidation.EvaluateFan("GPU", baseline.Gpu, custom.Gpu, max.Gpu, again.Gpu, pct);
+            rep.Passed = (rep.Cpu == null || rep.Cpu.Passed) && (rep.Gpu == null || rep.Gpu.Passed);
             return rep;
         }
 
@@ -289,20 +349,39 @@ namespace Forja.Core
                    .Append('/').Append(g.HasValue ? g.Value.ToString(CultureInfo.InvariantCulture) : "-");
                 double? cpuT = Temp(r == null ? null : r.CpuTempC);
                 double? gpuT = Temp(r == null ? null : r.GpuTempC);
-                if (!cpuT.HasValue || !gpuT.HasValue)
+                // Without a temperature nothing guards the test: never read it as 0 °C. Each fan the
+                // notebook has needs the temperature of its side; the other one is used when it is there.
+                if ((layout.Cpu && !cpuT.HasValue) || (layout.Gpu && !gpuT.HasValue) || (!cpuT.HasValue && !gpuT.HasValue))
                 {
-                    // Without a temperature nothing guards the test: never read it as 0 °C.
                     rep.Raw.Add(raw.ToString());
                     throw new AbortException("temperatura ilegível durante o teste", true);
                 }
-                double hot = Math.Max(cpuT.Value, gpuT.Value);
+                double hot = Math.Max(cpuT ?? 0, gpuT ?? 0);
                 if (hot >= AbortTempC)
                 {
                     rep.Raw.Add(raw.ToString());
                     throw new AbortException("temperatura chegou a " + ((int)hot).ToString(CultureInfo.InvariantCulture) + " °C (limite 90 °C)", true);
                 }
+                elapsedMs += SampleMs;
+                Report(name, c, g);
             }
             rep.Raw.Add(raw.ToString());
+        }
+
+        private void Report(string phase, int? cpuRpm, int? gpuRpm)
+        {
+            Action<FanProgress> cb = Progress;
+            if (cb == null) return;
+            FanProgress p = new FanProgress();
+            p.Phase = phase;
+            p.ElapsedMs = elapsedMs;
+            p.TotalMs = TotalMs;
+            p.Percent = Math.Min(100, (int)Math.Round(100.0 * elapsedMs / TotalMs));
+            p.CpuRpm = cpuRpm;
+            p.GpuRpm = gpuRpm;
+            p.Text = FanProgress.TextFor(phase, pct);
+            try { cb(p); }
+            catch (Exception) { }
         }
 
         // null = unreadable (missing, NaN, infinite or <= 0, as in FanController).

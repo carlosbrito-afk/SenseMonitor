@@ -139,7 +139,7 @@ namespace Forja.App
             cleanTitle = AddText(cleanCard, TextKind.Section, MaintColors.Text, false, "LIMPEZA");
             cleanDesc = AddText(cleanCard, TextKind.Body, MaintColors.Sec, true,
                 "Apaga arquivos temporários, caches e logs antigos que o Windows e os programas deixam para trás. Nada é apagado antes de você ver o tamanho e confirmar. "
-                + "Arquivos em uso e das últimas 24 horas ficam. A pasta de dumps de tela azul (Minidump) e seus documentos nunca são tocados.");
+                + "Arquivos em uso e das últimas 24 horas ficam. A pasta de despejos de falha do sistema (Minidump) e seus documentos nunca são tocados.");
             analyzeBtn = new DarkButton(skin, this, "Analisar", true);
             analyzeBtn.Click += delegate { OnAnalyze(); };
             cleanCard.Controls.Add(analyzeBtn);
@@ -998,7 +998,7 @@ namespace Forja.App
             if (plan.SelectedFolders > 0) req.Lines.Add("• Total estimado: " + SizeFormat.Format(plan.SelectedBytes) + ".");
             if (eventLogs) req.Lines.Add("• Os registros System, Application e Security do Windows não são limpos.");
             req.Lines.Add("• Arquivos em uso e criados nas últimas 24 horas ficam onde estão.");
-            req.Lines.Add("• A pasta Minidump (telas azuis) e seus documentos não são tocados.");
+            req.Lines.Add("• A pasta Minidump (despejos de falha do sistema) e seus documentos não são tocados.");
             req.Lines.Add("");
             req.Lines.Add("Isto NÃO pode ser desfeito: os arquivos apagados não vão para a Lixeira. Fica registrado no Histórico, sem botão Desfazer.");
             req.ConfirmText = "Limpar agora";

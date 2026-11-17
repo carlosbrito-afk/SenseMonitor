@@ -26,7 +26,14 @@ namespace Forja.App
         private readonly Config cfg;
         private readonly Action<Config> save;
         private readonly Func<double?> getTemp;
-        private readonly bool manualAllowed;
+        private bool manualAllowed;
+        // Which tabs are offered (Control.Visible is false while the page's parent is not shown yet).
+        private readonly bool[] tabOn = new bool[4];
+        // The fans this notebook has (environment test): a one-fan notebook shows one slider.
+        private FanLayout layout = FanLayout.Both;
+
+        // Why Manual/Curva/Máximo are not offered (the shell sets it; read-only mode has its own).
+        public string LockedNote = FanValidation.LockedNote;
         private readonly Func<bool> setFanMax;
         private readonly Func<bool> setFanAuto;
         private readonly Func<bool?> isFanMax;
@@ -111,33 +118,25 @@ namespace Forja.App
             hint = MakeLabel("Arraste os pontos · duplo clique adiciona · botão direito remove (mínimo 2)",
                 bodyFont, FanPageColors.Mute);
 
-            if (manualAllowed)
-            {
-                tabViews[0] = View.Auto;
-                tabViews[1] = View.Manual;
-                tabViews[2] = View.Curve;
-                tabViews[3] = View.Max;
-                tabs[0] = new SegmentButton("Automático");
-                tabs[1] = new SegmentButton("Manual");
-                tabs[2] = new SegmentButton("Curva");
-                tabs[3] = new SegmentButton("Máximo");
-            }
-            else
-            {
-                // Not validated on this hardware yet: Automático only.
-                tabViews[0] = View.Auto;
-                tabs[0] = new SegmentButton("Automático");
-                tabs[1] = null;
-                tabs[2] = null;
-                tabs[3] = null;
-            }
+            // All four tabs exist; without a confirmed fan test only Automático is shown (ApplyCapabilities
+            // changes that when the environment test finishes).
+            tabViews[0] = View.Auto;
+            tabViews[1] = View.Manual;
+            tabViews[2] = View.Curve;
+            tabViews[3] = View.Max;
+            tabs[0] = new SegmentButton("Automático");
+            tabs[1] = new SegmentButton("Manual");
+            tabs[2] = new SegmentButton("Curva");
+            tabs[3] = new SegmentButton("Máximo");
             for (int i = 0; i < tabs.Length; i++)
             {
-                if (tabs[i] == null) continue;
                 tabs[i].Tag = tabViews[i];
                 tabs[i].Click += OnTabClick;
+                tabOn[i] = i == 0 || manualAllowed;
+                tabs[i].Visible = tabOn[i];
                 Controls.Add(tabs[i]);
             }
+            layout = fan.Layout ?? FanLayout.Both;
 
             cpuLabel = MakeLabel("CPU", titleFont, FanPageColors.Sec);
             gpuLabel = MakeLabel("GPU", titleFont, FanPageColors.Sec);
@@ -221,12 +220,12 @@ namespace Forja.App
             int tabH = S(40);
             int gap = S(8);
             int count = 0;
-            for (int i = 0; i < tabs.Length; i++) { if (tabs[i] != null) count++; }
+            for (int i = 0; i < tabs.Length; i++) { if (tabs[i] != null && tabOn[i]) count++; }
             int tw = Math.Min(S(180), (w - gap * (count - 1)) / count);
             int x = pad;
             for (int i = 0; i < tabs.Length; i++)
             {
-                if (tabs[i] == null) continue;
+                if (tabs[i] == null || !tabOn[i]) continue;
                 tabs[i].SetBounds(x, y, tw, tabH);
                 x += tw + gap;
             }
@@ -245,11 +244,20 @@ namespace Forja.App
 
             // manual sliders
             int rowH = S(36);
-            int labelW = S(44);
+            int labelW = layout.Count == 1 ? S(78) : S(44);
             int valueW = Math.Max(S(56), TextRenderer.MeasureText("100%", monoFont).Width + S(8));
             int sliderW = Math.Max(S(40), w - labelW - valueW - S(16));
-            LayoutSliderRow(cpuLabel, cpuSlider, cpuValue, pad, bodyTop, rowH, labelW, sliderW, valueW, S(8));
-            LayoutSliderRow(gpuLabel, gpuSlider, gpuValue, pad, bodyTop + rowH + S(6), rowH, labelW, sliderW, valueW, S(8));
+            int rowY = bodyTop;
+            if (layout.Cpu)
+            {
+                LayoutSliderRow(cpuLabel, cpuSlider, cpuValue, pad, rowY, rowH, labelW, sliderW, valueW, S(8));
+                rowY += rowH + S(6);
+            }
+            if (layout.Gpu)
+            {
+                LayoutSliderRow(gpuLabel, gpuSlider, gpuValue, pad, rowY, rowH, labelW, sliderW, valueW, S(8));
+                rowY += rowH + S(6);
+            }
 
             // curve editor + footer
             int footerH = S(32);
@@ -264,7 +272,7 @@ namespace Forja.App
             // Manual view shares the restore button row below the sliders.
             if (CurrentView() == View.Manual)
             {
-                int my = bodyTop + (rowH + S(6)) * 2 + S(8);
+                int my = bodyTop + (rowH + S(6)) * Math.Max(1, layout.Count) + S(8);
                 restore.SetBounds(pad, my, rw, footerH);
             }
         }
@@ -288,7 +296,7 @@ namespace Forja.App
 
             for (int i = 0; i < tabs.Length; i++)
             {
-                if (tabs[i] == null) continue;
+                if (tabs[i] == null || !tabOn[i]) continue;
                 View tv = tabViews[i];
                 tabs[i].Selected = (tv == v);
                 bool enabled = true;
@@ -303,8 +311,8 @@ namespace Forja.App
 
             bool showSliders = v == View.Manual;
             bool showCurve = v == View.Curve;
-            cpuLabel.Visible = gpuLabel.Visible = cpuSlider.Visible = gpuSlider.Visible = showSliders;
-            cpuValue.Visible = gpuValue.Visible = showSliders;
+            cpuLabel.Visible = cpuSlider.Visible = cpuValue.Visible = showSliders && layout.Cpu;
+            gpuLabel.Visible = gpuSlider.Visible = gpuValue.Visible = showSliders && layout.Gpu;
             editor.Visible = hint.Visible = showCurve;
             restore.Visible = showSliders || showCurve;
 
@@ -312,7 +320,7 @@ namespace Forja.App
             if (v == View.Auto)
             {
                 infoText = "O firmware controla as ventoinhas. É o modo mais seguro e o padrão do app.";
-                if (!manualAllowed) infoText += "\n" + FanValidation.LockedNote + ".";
+                if (!manualAllowed) infoText += "\n" + LockedNote.TrimEnd('.') + ".";
                 else if (!fan.CurveAvailable) infoText += "\n" + NoTempText;
             }
             else if (v == View.Max) infoText = "Ventoinhas no máximo. Mais ruído e mais refrigeração; volte ao Automático quando quiser.";
@@ -426,6 +434,25 @@ namespace Forja.App
 
         public bool ManualAllowed { get { return manualAllowed; } }
 
+        // After the environment test: which fans exist, and whether Manual/Curva/Máximo are confirmed. Hidden
+        // tabs are gone from the layout; a mode that is no longer allowed hands the fans back to the firmware.
+        public void ApplyCapabilities(bool allowed, string lockedNote, FanLayout fans)
+        {
+            layout = fans ?? FanLayout.Both;
+            LockedNote = lockedNote ?? LockedNote;
+            if (!allowed && (maxActive || fan.Mode != FanUserMode.Auto)) SelectView(View.Auto);
+            manualAllowed = allowed;
+            for (int i = 1; i < tabs.Length; i++)
+            {
+                tabOn[i] = allowed;
+                tabs[i].Visible = allowed;
+            }
+            cpuLabel.Text = layout.Count == 1 ? "Ventoinha" : "CPU";
+            gpuLabel.Text = layout.Count == 1 ? "Ventoinha" : "GPU";
+            PerformLayout();
+            RefreshState();
+        }
+
         // Raised after every user choice of fan mode (tab or tray), so the shell can arm the
         // watchdog and the poll rate at once instead of on the next firmware tick.
         public event Action ModeChosen;
@@ -440,9 +467,25 @@ namespace Forja.App
             }
         }
 
+        // Non-null = the fans are busy (the environment wizard owns the firmware): every choice is refused with this reason,
+        // nothing is written.
+        public Func<string> BusyReason;
+
         private void ApplyView(View target)
         {
             maxMessage = null;
+            string busyNow = null;
+            if (BusyReason != null)
+            {
+                try { busyNow = BusyReason(); }
+                catch (Exception) { busyNow = null; }
+            }
+            if (busyNow != null)
+            {
+                maxMessage = busyNow;
+                RefreshState();
+                return;
+            }
             if (!manualAllowed && target != View.Auto)
             {
                 // Not validated: nothing but Automático (tray or a stale caller).

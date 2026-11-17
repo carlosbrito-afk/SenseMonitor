@@ -40,6 +40,23 @@ namespace Forja.App
             }
             try
             {
+                // The capability profile decides whether this tool may write to THIS notebook at all.
+                Config gateCfg;
+                if (Config.TryLoad(Config.DefaultPath, out gateCfg) != ConfigRead.Ok) gateCfg = new Config();
+                DetectionRaw id = null;
+                try { id = EnvProbe.ReadIdentity(); }
+                catch (Exception) { id = null; }
+                Safety.Fingerprint = MachineFingerprint.Make(id == null ? null : id.Model, id == null ? null : id.Bios);
+                string refusal = EnvGate.ForFanTool(gateCfg, id == null ? null : id.Model, id == null ? null : id.Bios, EnvSession.NowUtc());
+                if (refusal != null)
+                {
+                    Program.LogLine("Teste das ventoinhas recusado: " + refusal);
+                    MessageBox.Show(refusal, Caption, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return ToolExit.Refused;
+                }
+                FanLayout layout = gateCfg.EnvFanLayout;
+                bool modesOk = EnvGate.ModesAnnounced(gateCfg.Env);
+
                 DialogResult go = MessageBox.Show(
                     "Teste rápido das ventoinhas e dos modos (cerca de 45 segundos).\n\n"
                     + "• As ventoinhas vão mudar de velocidade e ficar no máximo por alguns segundos (barulho alto é normal).\n"
@@ -53,7 +70,7 @@ namespace Forja.App
                 {
                     Thread worker = new Thread(delegate()
                     {
-                        Outcome o = Execute(pct);
+                        Outcome o = Execute(pct, layout, modesOk);
                         outcome = o;
                         try { form.BeginInvoke((MethodInvoker)form.Done); }
                         catch (Exception) { }
@@ -96,24 +113,37 @@ namespace Forja.App
         }
 
         // Worker thread (MTA) with its own WmiFirmware; always ends with the fans in Automático.
-        private static Outcome Execute(int pct)
+        private static Outcome Execute(int pct, FanLayout layout, bool modesOk)
         {
             Outcome o = new Outcome();
-            WmiFirmware fw = null;
+            GuardedFirmware fw = null;
+            HeartbeatPump pump = null;
             Program.Validating = true;
             try
             {
-                fw = new WmiFirmware();
+                // The test writes to the firmware: not in diagnostic read-only mode. Its writes are
+                // journaled and tracked by the fan marker like the app's own.
+                Safety.ReadOnly = Safety.ReadOnlyRequestedFromDisk();
+                if (Safety.ReadOnly)
+                {
+                    o.Error = "O modo diagnóstico (somente leitura) está ligado: o teste envia comandos ao firmware. Desligue-o em Configurações e tente de novo.";
+                    return o;
+                }
+                // The fan sentinel guards the test too (it is the riskiest thing the app does: Máximo, 50 %).
+                Safety.EnsureSentinel = Sentinel.EnsureRunning;
+                pump = new HeartbeatPump();
+                FanLayoutStore.Set(layout); // only the fans this notebook has
+                fw = Safety.Wrap(new WmiFirmware());
                 if (!fw.Available)
                 {
                     o.Error = "O firmware não respondeu (o app precisa estar como administrador).";
                     return o;
                 }
-                FanValidationRunner runner = new FanValidationRunner(fw, fw.SetFanMax, Thread.Sleep, pct);
+                FanValidationRunner runner = new FanValidationRunner(fw, fw.SetFanMax, Thread.Sleep, pct, layout);
                 current = runner;
                 o.Fans = runner.RunFans();
                 // No mode changes after heat, an unreadable temperature or a cancel.
-                if (!o.Fans.SkipModeCheck) o.Modes = runner.RunModes();
+                if (!o.Fans.SkipModeCheck && modesOk) o.Modes = runner.RunModes();
             }
             catch (Exception ex)
             {
@@ -124,6 +154,7 @@ namespace Forja.App
                 try { if (fw != null) fw.SetFanAuto(); }
                 catch (Exception) { }
                 current = null;
+                if (pump != null) pump.Dispose();
                 Program.Validating = false;
             }
             return o;

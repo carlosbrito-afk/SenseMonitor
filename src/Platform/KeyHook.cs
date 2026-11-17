@@ -7,9 +7,11 @@ namespace Forja.Platform
 {
     // Listen-only low-level keyboard hook. It lives on its own background thread with its
     // own message loop so UI work can never starve it (Windows skips events and may remove
-    // hooks that exceed LowLevelHooksTimeout). Never swallows keys; only the target key
-    // press is posted to the UI thread. Construct on the UI thread (the SynchronizationContext
-    // is captured there; throws InvalidOperationException if there is none).
+    // hooks that exceed LowLevelHooksTimeout). Never swallows keys; only recognized gestures of the
+    // target key (NitroKey: tap, double/triple tap, long press) are posted to the UI thread. A small
+    // timer polls the recognizer only while a press or tap sequence is undecided (a lone tap is final
+    // only when no second tap follows), so an idle hook costs nothing. Construct on the UI thread
+    // (the SynchronizationContext is captured there; throws InvalidOperationException if there is none).
     // The owner must keep the KeyHook in a field and Dispose it: there is no finalizer.
     public class KeyHook : IDisposable
     {
@@ -73,9 +75,17 @@ namespace Forja.Platform
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
 
+        private const int PollMs = 40;
+
         private readonly NitroKey filter;
         private readonly Action onPress;
+        private readonly Action<NitroGesture> onGesture;
+        private readonly bool gestureMode; // false: one onPress per physical press (NitroKey.OnKey); true: gestures
         private readonly SynchronizationContext ui;
+        private readonly Timer pollTimer;
+        private readonly PollGate gate;
+        private readonly bool real;   // false: test instance (no thread, no system hook)
+        private volatile bool disposed;
         private readonly HookProc proc; // field keeps the delegate alive for the GC
         private readonly ManualResetEvent ready = new ManualResetEvent(false);
         private Thread thread;
@@ -83,15 +93,49 @@ namespace Forja.Platform
         private IntPtr handle; // owned by the hook thread
         private volatile bool installed;
 
-        public KeyHook(NitroKey filter, Action onPress)
+        // onPress runs on the UI thread once per physical press (the 700 ms debounce of NitroKey.OnKey):
+        // what the environment wizard's key test counts.
+        public KeyHook(NitroKey filter, Action onPress) : this(filter, onPress, null)
+        {
+        }
+
+        // Key gestures (tap, double tap, triple tap, long press): onGesture runs on the UI thread once
+        // per recognized gesture. A small timer polls the recognizer only while a sequence is undecided.
+        public static KeyHook ForGestures(NitroKey filter, Action<NitroGesture> onGesture)
+        {
+            if (onGesture == null) throw new ArgumentNullException("onGesture");
+            return new KeyHook(filter, delegate { }, onGesture);
+        }
+
+        // A hook that is NOT installed: events come in through Process, gestures go out through the same
+        // timer and dispatch path as the real one. For tests; needs no desktop session.
+        internal static KeyHook ForTests(NitroKey filter, Action<NitroGesture> onGesture, SynchronizationContext ui)
+        {
+            if (onGesture == null) throw new ArgumentNullException("onGesture");
+            if (ui == null) throw new ArgumentNullException("ui");
+            return new KeyHook(filter, delegate { }, onGesture, ui, false);
+        }
+
+        private KeyHook(NitroKey filter, Action onPress, Action<NitroGesture> onGesture)
+            : this(filter, onPress, onGesture, SynchronizationContext.Current, true)
+        {
+        }
+
+        private KeyHook(NitroKey filter, Action onPress, Action<NitroGesture> onGesture, SynchronizationContext context, bool install)
         {
             if (filter == null) throw new ArgumentNullException("filter");
             if (onPress == null) throw new ArgumentNullException("onPress");
-            ui = SynchronizationContext.Current;
+            this.onGesture = onGesture;
+            gestureMode = onGesture != null;
+            ui = context;
             if (ui == null) throw new InvalidOperationException("KeyHook must be constructed on a thread with a SynchronizationContext (the UI thread).");
             this.filter = filter;
             this.onPress = onPress;
+            real = install;
             proc = Callback;
+            pollTimer = new Timer(PollTick, null, Timeout.Infinite, Timeout.Infinite);
+            gate = new PollGate(delegate { return filter.Busy; }, SetPollTimer);
+            if (!install) return;
 
             thread = new Thread(Run);
             thread.IsBackground = true;
@@ -102,12 +146,18 @@ namespace Forja.Platform
 
         public bool IsInstalled { get { return installed; } }
 
+        // The gesture poll timer is on (tests).
+        internal bool PollingRunning { get { return gate.Running; } }
+
         // Forget a held target key; call on PowerEvents.Resumed and on session unlock,
         // because a keyup released during sleep/lock never reaches the hook.
         public void Reset()
         {
             filter.Reset();
         }
+
+        // The gesture recognizer's options (long press, double/triple tap) live on the filter.
+        public NitroKey Filter { get { return filter; } }
 
         private void Run()
         {
@@ -138,24 +188,84 @@ namespace Forja.Platform
                 try
                 {
                     KBDLLHOOKSTRUCT k = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
-                    if (filter.OnKey(wParam.ToInt32(), k.vkCode, k.scanCode, k.flags, k.time)) ui.Post(Invoke, null);
+                    Process(wParam.ToInt32(), k.vkCode, k.scanCode, k.flags, k.time);
                 }
                 catch { }
             }
             return CallNextHookEx(handle, nCode, wParam, lParam);
         }
 
+        // One keyboard event, on the hook thread (or a test's). Everything the callback does after it has
+        // read the event: filter, dispatch to the UI thread, keep the poll timer running while undecided.
+        internal void Process(int msg, int vk, int scan, int flags, int time)
+        {
+            if (gestureMode)
+            {
+                NitroGesture g = filter.OnKeyGesture(msg, vk, scan, flags, time);
+                if (g != NitroGesture.None) Deliver(g);
+                if (filter.Busy) gate.Ensure();
+            }
+            else if (filter.OnKey(msg, vk, scan, flags, time))
+            {
+                ui.Post(Invoke, NitroGesture.None);
+            }
+        }
+
+        private void Deliver(NitroGesture g)
+        {
+            if (disposed) return;
+            ui.Post(Invoke, g);
+        }
+
         private void Invoke(object state)
         {
+            if (disposed) return;
+            if (gestureMode)
+            {
+                try { onGesture((NitroGesture)state); }
+                catch { }
+                return;
+            }
             try { onPress(); }
             catch { }
         }
 
+        private void SetPollTimer(bool on)
+        {
+            if (disposed) return;
+            try { pollTimer.Change(on ? PollMs : Timeout.Infinite, on ? PollMs : Timeout.Infinite); }
+            catch (ObjectDisposedException) { }
+        }
+
+        // Pool thread: asks the recognizer whether time alone decided something; the gate stops the timer
+        // when nothing is left to decide (see PollGate for the ordering that keeps it from sticking off).
+        private void PollTick(object state)
+        {
+            try
+            {
+                if (disposed) return;
+                gate.Tick(delegate
+                {
+                    NitroGesture g = filter.Poll();
+                    if (g != NitroGesture.None) Deliver(g);
+                });
+            }
+            catch (Exception) { }
+        }
+
         public void Dispose()
         {
+            if (!real)
+            {
+                disposed = true;
+                pollTimer.Dispose();
+                return;
+            }
             Thread t = thread;
             thread = null;
             if (t == null) return;
+            disposed = true;
+            pollTimer.Dispose();
             if (installed) PostThreadMessage(threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
             // The hook thread clears `installed` itself right after UnhookWindowsHookEx; only claim
             // "removed" here when it really ended (a join that timed out leaves it reported as installed).

@@ -9,10 +9,17 @@ namespace Forja.Core
         // in an unverified Custom state.
         public static bool SetPercent(Func<string, ulong, bool> set, int cpuPct, int gpuPct)
         {
-            bool ok = set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Custom, FanMode.Custom))
-                && set("SetGamingFanSpeed", Codes.FanSpeed(Codes.FanCpu, cpuPct))
-                && set("SetGamingFanSpeed", Codes.FanSpeed(Codes.FanGpu, gpuPct));
-            if (!ok) set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Auto, FanMode.Auto));
+            return SetPercent(set, cpuPct, gpuPct, FanLayout.Both);
+        }
+
+        // Only the fans of the layout are written (a one-fan notebook is never asked for the other).
+        public static bool SetPercent(Func<string, ulong, bool> set, int cpuPct, int gpuPct, FanLayout layout)
+        {
+            if (layout == null) layout = FanLayout.Both;
+            bool ok = set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Custom, FanMode.Custom, layout))
+                && (!layout.Cpu || set("SetGamingFanSpeed", Codes.FanSpeed(Codes.FanCpu, cpuPct)))
+                && (!layout.Gpu || set("SetGamingFanSpeed", Codes.FanSpeed(Codes.FanGpu, gpuPct)));
+            if (!ok) set("SetGamingFanBehavior", Codes.FanBehavior(FanMode.Auto, FanMode.Auto, layout));
             return ok;
         }
     }

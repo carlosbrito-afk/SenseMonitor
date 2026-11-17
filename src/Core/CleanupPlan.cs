@@ -226,13 +226,13 @@ namespace Forja.Core
                 true, false, true);
 
             plan.AddMany(env, CleanupTargetId.ErrorReports, GroupLogs, "Relatórios de erro do Windows",
-                "Relatórios de falhas de programas já enviados ou na fila (WER). Relatórios de tela azul (Kernel_, LiveKernelEvent) e a pasta Minidump ficam. " + age,
+                "Relatórios de falhas de programas já enviados ou na fila (WER). Relatórios de falha do sistema (Kernel_, LiveKernelEvent) e a pasta Minidump ficam. " + age,
                 CleanupLocator.ErrorReportRoots(env), null, false, false, true);
             plan.AddMany(env, CleanupTargetId.WindowsLogs, GroupLogs, "Logs antigos do Windows",
                 "Arquivos .log e .cab antigos do CBS, logs do DISM e arquivos .etl do Windows Update. O CBS.log atual fica e a pasta Panther não é tocada. " + age,
                 CleanupLocator.WindowsLogRoots(env), null, true, false, true);
             plan.AddAction(env, CleanupTargetId.EventLogs, GroupLogs, "Registros do Visualizador de Eventos",
-                "Limpa só uma lista fixa de registros de aplicativos, rede, Loja e telemetria do Windows (por exemplo PowerShell, Wi-Fi e Loja). O resto fica: System, Application, Security e Setup ficam de propósito, assim como tudo de energia (Kernel-Power), WHEA, drivers, disco e travamentos, que servem para investigar telas azuis e a aba Saúde. Não dá para desfazer.",
+                "Limpa só uma lista fixa de registros de aplicativos, rede, Loja e telemetria do Windows (por exemplo PowerShell, Wi-Fi e Loja). O resto fica: System, Application, Security e Setup ficam de propósito, assim como tudo de energia (Kernel-Power), WHEA, drivers, disco e travamentos, que servem para investigar falhas do sistema e a aba Saúde. Não dá para desfazer.",
                 true, true, false);
             return plan;
         }

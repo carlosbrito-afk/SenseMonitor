@@ -13,6 +13,7 @@ namespace Forja.Platform
     {
         private const string Provider41 = "Microsoft-Windows-Kernel-Power";
         private const string Provider1001 = "Microsoft-Windows-WER-SystemErrorReporting";
+        private const string Provider6008 = "EventLog";
 
         public static string MinidumpDirectory()
         {
@@ -35,9 +36,10 @@ namespace Forja.Platform
             {
                 List<Kernel41Event> k41 = new List<Kernel41Event>();
                 List<Wer1001Event> w1001 = new List<Wer1001Event>();
-                ReadEvents(logName, sinceLocal, k41, w1001);
+                List<Unexpected6008Event> e6008 = new List<Unexpected6008Event>();
+                ReadEvents(logName, sinceLocal, k41, w1001, e6008);
                 List<DumpFileInfo> dumps = ListDumps(dumpDir);
-                entries = CrashParse.Merge(k41, w1001, dumps);
+                entries = CrashParse.Merge(k41, w1001, e6008, dumps);
                 return true;
             }
             catch (Exception)
@@ -47,13 +49,14 @@ namespace Forja.Platform
             }
         }
 
-        private static void ReadEvents(string logName, DateTime sinceLocal, List<Kernel41Event> k41, List<Wer1001Event> w1001)
+        private static void ReadEvents(string logName, DateTime sinceLocal, List<Kernel41Event> k41, List<Wer1001Event> w1001, List<Unexpected6008Event> e6008)
         {
             string stamp = sinceLocal.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'");
             string query =
                 "*[System[TimeCreated[@SystemTime>='" + stamp + "'] and (" +
                 "(EventID=41 and Provider[@Name='" + Provider41 + "']) or " +
-                "(EventID=1001 and Provider[@Name='" + Provider1001 + "']))]]";
+                "(EventID=1001 and Provider[@Name='" + Provider1001 + "']) or " +
+                "(EventID=6008 and Provider[@Name='" + Provider6008 + "']))]]";
             EventLogQuery q = new EventLogQuery(logName, PathType.LogName, query);
             using (System.Diagnostics.Eventing.Reader.EventLogReader r = new System.Diagnostics.Eventing.Reader.EventLogReader(q))
             {
@@ -66,15 +69,11 @@ namespace Forja.Platform
                         DateTime when = rec.TimeCreated.Value.ToLocalTime();
                         if (rec.Id == 41)
                         {
-                            long code;
-                            ulong? p1;
-                            if (CrashParse.TryParseEvent41(rec.ToXml(), out code, out p1))
+                            Kernel41Event detail;
+                            if (CrashParse.TryParseEvent41Detail(rec.ToXml(), out detail))
                             {
-                                Kernel41Event e = new Kernel41Event();
-                                e.When = when;
-                                e.BugcheckCode = code;
-                                e.Param1 = p1;
-                                k41.Add(e);
+                                detail.When = when;
+                                k41.Add(detail);
                             }
                             else
                             {
@@ -83,6 +82,13 @@ namespace Forja.Platform
                                 e.When = when;
                                 k41.Add(e);
                             }
+                        }
+                        else if (rec.Id == 6008)
+                        {
+                            Unexpected6008Event x = new Unexpected6008Event();
+                            x.When = when;
+                            x.DownAt = CrashParse.ParseDownTimeFromEvent6008(rec.ToXml());
+                            e6008.Add(x);
                         }
                         else if (rec.Id == 1001)
                         {

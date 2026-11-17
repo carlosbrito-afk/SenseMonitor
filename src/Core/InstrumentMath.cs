@@ -267,20 +267,10 @@ namespace Forja.Core
             return n == 1 ? "1 dia" : n.ToString(CultureInfo.InvariantCulture) + " dias";
         }
 
-        // ---- stability ("sem tela azul") ---------------------------------------------
-
         public static int WholeDaysBetween(DateTime since, DateTime now)
         {
             double d = (now - since).TotalDays;
             return d <= 0 ? 0 : (int)Math.Floor(d);
-        }
-
-        // Detail text for the verdict strip.
-        public static string NoCrashSummary(int? days)
-        {
-            if (!days.HasValue) return "Sem dados de tela azul";
-            if (days.Value <= 0) return "Sem tela azul há menos de 1 dia";
-            return "Sem tela azul há " + Days(days.Value);
         }
 
         // ---- accessibility ------------------------------------------------------------

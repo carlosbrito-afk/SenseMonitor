@@ -13,9 +13,10 @@ if not exist bin mkdir bin
 set "RC=0"
 if /i "%TARGET%"=="tests" goto :tests
 if /i "%TARGET%"=="probe" goto :probe
+if /i "%TARGET%"=="release" goto :release
 if /i "%TARGET%"=="app" goto :app
 if /i "%TARGET%"=="all" goto :tests
-echo Uso: build.cmd [app^|tests^|probe^|all]
+echo Uso: build.cmd [app^|tests^|probe^|release^|all]
 set "RC=2"
 goto :done
 
@@ -35,10 +36,18 @@ if exist "tools\Probe\*.cs" (
 )
 if /i "%TARGET%"=="probe" goto :done
 
+:release
+if exist "tools\Release\*.cs" (
+  echo Compilando bin\ForjaRelease.exe
+  "%CSC%" %COMMON% /target:exe /out:bin\ForjaRelease.exe %SRCLIB% tools\Release\*.cs
+  if errorlevel 1 set "RC=1"
+)
+if /i "%TARGET%"=="release" goto :done
+
 :app
 if exist "src\App\*.cs" (
   echo Compilando bin\SenseMonitor.exe
-  "%CSC%" %COMMON% /target:winexe /win32manifest:src\App\app.manifest /win32icon:src\App\forja.ico /out:bin\SenseMonitor.exe %SRCLIB% src\App\*.cs src\App\Controls\*.cs
+  "%CSC%" %COMMON% /target:winexe /win32manifest:src\App\app.manifest /win32icon:src\App\forja.ico /resource:src\App\app.config,SenseMonitor.app.config /out:bin\SenseMonitor.exe %SRCLIB% src\App\*.cs src\App\Controls\*.cs
   if errorlevel 1 set "RC=1"
   copy /y src\App\app.config bin\SenseMonitor.exe.config >nul
 )

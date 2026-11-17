@@ -4,7 +4,11 @@ namespace Forja.Core
     {
         Silencioso,
         DiaADia,
-        Desempenho
+        Desempenho,
+        // Firmware profiles 6 and 5. Offered only when the environment test confirmed them
+        // (see CapabilityProfile); the first three keep their old meaning and order.
+        Economico,
+        Turbo
     }
 
     public class SensorReading

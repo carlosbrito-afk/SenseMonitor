@@ -27,7 +27,7 @@ namespace Forja.App
     {
         public const int CrashDays = Stability.CrashWindowDays;
         public const int TempDays = 7;
-        public static readonly string EmptyCrashText = "Nenhuma tela azul nos últimos " + CrashDays + " dias";
+        public static readonly string EmptyCrashText = "Nenhum reinício inesperado nos últimos " + CrashDays + " dias";
         private const int MaxCrashRows = 40;
         private static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(45);
 
@@ -73,6 +73,9 @@ namespace Forja.App
         private bool busy;
         private bool loadRequested;
         private DateTime lastLoaded = DateTime.MinValue;
+
+        // Rows of the restart list as drawn last (view coordinates): a click opens that restart's report.
+        private readonly List<KeyValuePair<Rectangle, CrashEntry>> rowHits = new List<KeyValuePair<Rectangle, CrashEntry>>();
 
         private readonly PlainLabel title;
         private readonly PlainLabel status;
@@ -483,6 +486,20 @@ namespace Forja.App
                 Relayout();
             }
 
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                base.OnMouseMove(e);
+                Cursor = owner.RowAt(e.Location) != null ? Cursors.Hand : Cursors.Default;
+            }
+
+            protected override void OnMouseClick(MouseEventArgs e)
+            {
+                base.OnMouseClick(e);
+                if (e.Button != MouseButtons.Left) return;
+                CrashEntry c = owner.RowAt(e.Location);
+                if (c != null) owner.OpenReport(c);
+            }
+
             protected override void OnMouseWheel(MouseEventArgs e)
             {
                 ScrollHost h = Parent as ScrollHost;
@@ -501,6 +518,31 @@ namespace Forja.App
                 owner.EnsureFonts(owner.CurrentDpi());
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 owner.Render(e.Graphics, Width, true, e.ClipRectangle);
+            }
+        }
+
+        private CrashEntry RowAt(Point p)
+        {
+            foreach (KeyValuePair<Rectangle, CrashEntry> h in rowHits)
+            {
+                if (h.Key.Contains(p)) return h.Value;
+            }
+            return null;
+        }
+
+        // The report of one restart (built off the UI thread inside the dialog).
+        private void OpenReport(CrashEntry c)
+        {
+            try
+            {
+                using (FailureReportForm f = new FailureReportForm(c))
+                {
+                    f.ShowDialog(FindForm());
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.LogError(ex);
             }
         }
 
@@ -624,12 +666,13 @@ namespace Forja.App
             return a + " · " + b;
         }
 
-        // ---- section: blue screens ------------------------------------------------------------------------
+        // ---- section: system stability (unexpected restarts) -----------------------------------------------
 
         private int SectionCrash(Graphics g, Rectangle r, bool draw)
         {
+            if (draw) rowHits.Clear();
             int y = r.Y;
-            y += Caption(g, draw, r, "TELAS AZUIS", "últimos " + CrashDays + " dias");
+            y += Caption(g, draw, r, "ESTABILIDADE DO SISTEMA", "reinícios inesperados · últimos " + CrashDays + " dias");
             if (crashState == LoadState.Loading)
             {
                 y += Message(g, draw, r, y, "Carregando…", Pal.Sec);
@@ -641,27 +684,28 @@ namespace Forja.App
                 return y - r.Y;
             }
 
-            int blue = 0;
-            int noCode = 0;
+            int system = 0, hang = 0, power = 0, unknown = 0;
             foreach (CrashEntry e in crashes)
             {
-                if (e.Code.HasValue) blue++;
-                else noCode++;
+                if (e.Kind == FailureKind.BlueScreen) system++;
+                else if (e.Kind == FailureKind.HangPowerButton) hang++;
+                else if (e.Kind == FailureKind.PowerLoss) power++;
+                else unknown++;
             }
 
-            // Summary line: status dot, count, and the shutdowns without a code.
+            // Summary line: status dot, count, and how they split by kind.
             int lineH = hUi + S(6);
             int dot = S(8);
             int tx = r.X + dot + S(8);
-            Color dotColor = blue > 0 ? Pal.Warn : Pal.Ok;
+            Color dotColor = crashes.Count > 0 ? Pal.Warn : Pal.Ok;
             Dot(g, draw, dotColor, r.X, y + lineH / 2);
-            string main = blue > 0 ? HealthFormat.BlueScreens(blue) + " nos últimos " + CrashDays + " dias" : EmptyCrashText;
+            string main = crashes.Count > 0 ? HealthFormat.UnexpectedRestarts(crashes.Count) + " nos últimos " + CrashDays + " dias" : EmptyCrashText;
             int mw = Math.Min(r.Right - tx, TextW(main, fUi) + S(2));
             Txt(g, draw, main, fUi, Pal.Text, new Rectangle(tx, y, mw, lineH), false);
-            if (noCode > 0)
+            if (crashes.Count > 0)
             {
                 int sx = tx + mw + S(6);
-                Txt(g, draw, "· " + HealthFormat.UnexpectedShutdowns(noCode), fUi, Pal.Sec,
+                Txt(g, draw, "· " + HealthFormat.RestartBreakdown(system, hang, power, unknown), fUi, Pal.Sec,
                     new Rectangle(sx, y, Math.Max(10, r.Right - sx), lineH), false);
             }
             y += lineH;
@@ -670,13 +714,13 @@ namespace Forja.App
             y += S(8);
             int colGap = S(12);
             int dateW = TextW("00/00 00:00", fMono);
-            int codeW = TextW("0x1000007E", fMono);
+            string linkText = "Ver relatório ›";
+            int linkW = TextW(linkText, fUi) + S(2);
             int dumpW = Math.Max(TextW("Minidump: sim", fSmall), TextW("Minidump: não", fSmall));
             int dateX = r.X;
-            int codeX = dateX + dateW + colGap;
-            int nameX = codeX + codeW + colGap;
+            int titleX = dateX + dateW + colGap;
+            int linkX = r.Right - linkW;
             int dumpX = r.Right - dumpW;
-            int nameW = Math.Max(10, r.Right - nameX);
             int l1 = hUi + S(2);
             int l2 = hSmall + S(2);
             int rowPad = S(6);
@@ -687,37 +731,15 @@ namespace Forja.App
             {
                 CrashEntry e = crashes[i];
                 Hairline(g, draw, r.X, y, r.Width);
+                if (draw) rowHits.Add(new KeyValuePair<Rectangle, CrashEntry>(new Rectangle(r.X, y, r.Width, rowH), e));
                 int ry = y + rowPad;
-                Txt(g, draw, e.When.ToString("dd/MM HH:mm"), fMono, Pal.Text, new Rectangle(dateX, ry, dateW, l1), false);
+                Txt(g, draw, e.EffectiveTime.ToString("dd/MM HH:mm"), fMono, Pal.Text, new Rectangle(dateX, ry, dateW, l1), false);
+                Txt(g, draw, FailureText.KindTitle(e.Kind), fUi, e.Kind == FailureKind.BlueScreen ? Pal.Warn : Pal.Text,
+                    new Rectangle(titleX, ry, Math.Max(10, linkX - colGap - titleX), l1), false);
+                Txt(g, draw, linkText, fUi, Pal.Accent, new Rectangle(linkX, ry, linkW, l1), true);
                 string yes = e.HasDump ? "Minidump: sim" : "Minidump: não";
                 Txt(g, draw, yes, fSmall, e.HasDump ? Pal.Ok : Pal.Mute, new Rectangle(dumpX, ry + l1, dumpW, l2), true);
-                if (e.Code.HasValue)
-                {
-                    CrashCodeInfo info = e.Info;
-                    Txt(g, draw, e.CodeHex, fMono, Pal.Warn, new Rectangle(codeX, ry, codeW, l1), false);
-                    string name = info.Symbol != null ? info.Symbol : "Código sem nome conhecido";
-                    int nw = Math.Min(nameW, TextW(name, fUi) + S(2));
-                    Txt(g, draw, name, fUi, Pal.Text, new Rectangle(nameX, ry, nw, l1), false);
-                    if (info.Modified)
-                    {
-                        // Only drawn when it fits whole; the hex code above already shows the exact value.
-                        string variant = "variante de " + CrashParse.FormatCode(e.Code.Value & 0x0FFFFFFFL);
-                        int vx = nameX + nw + S(8);
-                        if (TextW(variant, fSmall) <= r.Right - vx)
-                        {
-                            Txt(g, draw, variant, fSmall, Pal.Mute, new Rectangle(vx, ry, r.Right - vx, l1), false);
-                        }
-                    }
-                    string hint = info.Hint;
-                    Txt(g, draw, hint, fSmall, Pal.Mute, new Rectangle(codeX, ry + l1, Math.Max(10, dumpX - colGap - codeX), l2), false);
-                }
-                else
-                {
-                    Txt(g, draw, "Desligamento inesperado sem código", fUi, Pal.Sec,
-                        new Rectangle(codeX, ry, Math.Max(10, r.Right - codeX), l1), false);
-                    Txt(g, draw, "Sem código registrado: queda de energia ou travamento", fSmall, Pal.Mute,
-                        new Rectangle(codeX, ry + l1, Math.Max(10, dumpX - colGap - codeX), l2), false);
-                }
+                Txt(g, draw, FailureText.RowDetail(e), fSmall, Pal.Mute, new Rectangle(titleX, ry + l1, Math.Max(10, dumpX - colGap - titleX), l2), false);
                 y += rowH;
             }
             if (crashes.Count > shown)

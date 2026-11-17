@@ -4,7 +4,10 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <!-- asInvoker on purpose: FirstStageRunner (Program.Main) checks the folder BEFORE it asks for
+             elevation, then relaunches itself elevated (runas). The tasks that start the app, the sentinel
+             and the update helper are elevated already. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

@@ -309,6 +309,9 @@ namespace Forja.Tests
             Assert.Equal(2000, PollPolicy.FirmwareIntervalMs(FanUserMode.Curve, false, false, true));
             Assert.Equal(2000, PollPolicy.FirmwareIntervalMs(FanUserMode.Auto, true, false, true));
             Assert.Equal(2000, PollPolicy.FirmwareIntervalMs(FanUserMode.Auto, false, false, false));
+            // A mode switch being proven keeps the tick at 2 s even hidden in Automático (coverage for the proof).
+            Assert.Equal(2000, PollPolicy.FirmwareIntervalMs(FanUserMode.Auto, false, false, true, true));
+            Assert.Equal(12000, PollPolicy.FirmwareIntervalMs(FanUserMode.Auto, false, false, true, false));
         }
 
         [Test]

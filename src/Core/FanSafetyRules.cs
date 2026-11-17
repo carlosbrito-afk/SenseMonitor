@@ -41,18 +41,43 @@ namespace Forja.Core
 
         public static int FirmwareIntervalMs(FanUserMode mode, bool maxActive, bool windowVisible, bool autoConfirmed)
         {
+            return FirmwareIntervalMs(mode, maxActive, windowVisible, autoConfirmed, false);
+        }
+
+        // proofActive: a mode switch is being measured (the 75 s after it, ModeSwitchTracker.NeedsFastTick):
+        // the proof needs readings every 2 s even with the window hidden, else it never gets 30 s of coverage.
+        public static int FirmwareIntervalMs(FanUserMode mode, bool maxActive, bool windowVisible, bool autoConfirmed, bool proofActive)
+        {
+            if (proofActive) return FastMs;
             if (mode == FanUserMode.Auto && !maxActive && !windowVisible && autoConfirmed) return SlowMs;
             return FastMs;
         }
     }
 
     // Startup: the performance mode goes back to "Dia a dia" (spec), confirmed by read-back.
+    // Read before write: the mode is read first and written only when it differs, so a start that
+    // finds Dia a dia already active sends nothing to the firmware (the journal says so).
     public static class StartupMode
     {
-        // Returns the mode the firmware is in afterwards (null if unreadable). Never throws;
-        // a failure is reported through log (one line, no personal data).
+        public const string AlreadyText = "modo Dia a dia: sem escrita (já estava)";
+
         public static PerfMode? Apply(IFirmware fw, Action<string> log)
         {
+            return Apply(fw, log, null);
+        }
+
+        // Returns the mode the firmware is in afterwards (null if unreadable). Never throws;
+        // a failure is reported through log (one line, no personal data).
+        public static PerfMode? Apply(IFirmware fw, Action<string> log, IJournal journal)
+        {
+            PerfMode? current = null;
+            try { current = fw == null ? null : fw.GetMode(); }
+            catch (Exception) { current = null; }
+            if (current.HasValue && current.Value == PerfMode.DiaADia)
+            {
+                if (journal != null) journal.Write(JournalKind.Action, AlreadyText);
+                return PerfMode.DiaADia;
+            }
             bool ok = false;
             try { ok = fw != null && fw.SetMode(PerfMode.DiaADia); }
             catch (Exception) { ok = false; }

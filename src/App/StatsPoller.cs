@@ -15,12 +15,15 @@ namespace Forja.App
         public long RamUsed;
         public long RamTotal;
         public bool GpuReady;
+        // Legacy shape for the gauges (usage, temperature); derived from Frame.Gpu.
         public GpuInfo Gpu;
+        // Everything the telemetry layer reads (CPU clock/limit/cores, GPU, power plan).
+        public TelemetryFrame Frame;
     }
 
-    // Owns SystemStats on ONE background thread (its constructor and Gpu() block).
-    // Samples about once per second while resumed; when paused the thread sleeps and the
-    // performance counter is released. Results are posted to the UI thread.
+    // Owns SystemStats and TelemetryProbe on ONE background thread (their constructors and
+    // nvidia-smi block). Samples about once per second while resumed; when paused the thread
+    // sleeps and the performance counters are released. Results are posted to the UI thread.
     internal sealed class StatsPoller
     {
         private const int PeriodMs = 1000;
@@ -31,6 +34,24 @@ namespace Forja.App
         private Thread thread;
         private volatile bool active;
         private volatile bool stopping;
+        // Firmware GPU temperature for the nvidia-smi gate: a boxed double, or null = no reading
+        // yet (0 or less = the GPU sleeps and nvidia-smi is not started).
+        private volatile object firmwareGpuTemp;
+
+        public void SetFirmwareGpuTemp(double? t)
+        {
+            firmwareGpuTemp = t.HasValue ? (object)t.Value : null;
+        }
+
+        // None while only pages that need no GPU data (Modos) are active: the GPU counters and
+        // nvidia-smi are not read at all then. Counters: the driver-free counters only (the widget);
+        // Full: counters plus nvidia-smi when its gate allows (the Monitor page).
+        private volatile int gpuWant = (int)GpuWant.Full;
+
+        public void SetGpuWant(GpuWant want)
+        {
+            gpuWant = (int)want;
+        }
 
         public StatsPoller(Action<StatsSnapshot> onSample)
         {
@@ -72,13 +93,16 @@ namespace Forja.App
             Thread t = thread;
             if (t == null) return;
             wake.Set();
-            t.Join(2500); // Gpu() may be waiting on nvidia-smi for up to 1.5 s
+            t.Join(3500); // the GPU read may be waiting on nvidia-smi for up to 2 s
         }
 
         private void Run()
         {
             SystemStats stats = null;
-            GpuInfo gpu = null;
+            TelemetryProbe probe = null;
+            GpuSample gpu = null;
+            bool gpuSleeping = false;
+            bool gpuIdle = false;
             bool gpuReady = false;
             try
             {
@@ -92,6 +116,7 @@ namespace Forja.App
                             {
                                 stats.Dispose();
                                 stats = null;
+                                if (probe != null) { probe.Dispose(); probe = null; }
                                 PerformanceCounter.CloseSharedResources();
                             }
                             wake.WaitOne();
@@ -102,7 +127,11 @@ namespace Forja.App
                         if (stats == null)
                         {
                             stats = new SystemStats(); // primes the CPU counter; first value is not meaningful
+                            probe = new TelemetryProbe();
+                            probe.Log = delegate(string msg) { Program.LogLine("Telemetria: " + msg); };
                             gpu = null;
+                            gpuSleeping = false;
+                            gpuIdle = false;
                             gpuReady = false;
                         }
                         else
@@ -115,12 +144,25 @@ namespace Forja.App
                         MemorySnapshot m = RamCleaner.Snapshot();
                         s.RamUsed = m.InUse >= 0 ? m.InUse : stats.RamUsedBytes();
                         s.RamTotal = m.Total > 0 ? m.Total : stats.RamTotalBytes();
-                        // GPU (nvidia-smi, up to 1.5 s) is posted one period late so it never
-                        // delays CPU/RAM.
+                        // CPU telemetry now; the GPU (nvidia-smi, up to 2 s) is posted one period late
+                        // so it never delays CPU/RAM.
+                        TelemetryFrame frame = new TelemetryFrame();
+                        frame.Cpu = probe.ReadCpu();
+                        frame.Power = probe.ReadPowerPlan();
+                        frame.Gpu = gpu;
+                        frame.GpuSleeping = gpuSleeping;
+                        frame.GpuIdle = gpuIdle;
+                        s.Frame = frame;
                         s.GpuReady = gpuReady;
-                        s.Gpu = gpu;
+                        s.Gpu = ToGpuInfo(gpu);
                         if (active && !stopping && ui != null) ui.Post(Deliver, s);
-                        gpu = stats.Gpu();
+                        object fwTemp = firmwareGpuTemp;
+                        TelemetryFrame gf = new TelemetryFrame();
+                        GpuWant gw = (GpuWant)gpuWant;
+                        if (GpuWants.ReadsGpu(gw)) probe.ReadGpu(gf, fwTemp == null ? (double?)null : (double?)(double)fwTemp, gw);
+                        gpu = gf.Gpu;
+                        gpuSleeping = gf.GpuSleeping;
+                        gpuIdle = gf.GpuIdle;
                         gpuReady = true;
                         int wait = PeriodMs - unchecked(Environment.TickCount - t0);
                         wake.WaitOne(wait < 200 ? 200 : wait);
@@ -135,6 +177,12 @@ namespace Forja.App
                             catch (Exception) { }
                             stats = null;
                         }
+                        if (probe != null)
+                        {
+                            try { probe.Dispose(); }
+                            catch (Exception) { }
+                            probe = null;
+                        }
                         wake.WaitOne(2000);
                     }
                 }
@@ -142,7 +190,17 @@ namespace Forja.App
             finally
             {
                 if (stats != null) stats.Dispose();
+                if (probe != null) probe.Dispose();
             }
+        }
+
+        private static GpuInfo ToGpuInfo(GpuSample g)
+        {
+            if (g == null) return null;
+            GpuInfo i = new GpuInfo();
+            if (g.UsagePct.HasValue) i.UsagePct = (int)Math.Round(g.UsagePct.Value, MidpointRounding.AwayFromZero);
+            i.TempC = g.TempC;
+            return (i.UsagePct.HasValue || i.TempC.HasValue) ? i : null;
         }
 
         private void Deliver(object state)

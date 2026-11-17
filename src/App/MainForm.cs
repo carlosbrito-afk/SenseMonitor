@@ -76,6 +76,7 @@ namespace Forja.App
             ClientSize = new Size(BaseWidth, BaseHeight);
 
             strip = new VerdictStrip();
+            strip.Clicked += delegate { app.OnStripClicked(); };
             Controls.Add(strip);
             nav = new NavPanel();
             Controls.Add(nav);
@@ -92,13 +93,28 @@ namespace Forja.App
                     app.SaveConfigQuietly();
                 });
             modes.ConfirmWarning = ConfirmPerfWarning;
+            modes.LockedReason = delegate
+            {
+                if (app.ReadOnly) return SafetyText.ReadOnlyReason;
+                return app.EnvOwnsFirmware ? "O teste de ambiente está usando o firmware: aguarde ele terminar." : null;
+            };
+            modes.ViewSource = app.Telemetry.BuildModesView;
+            modes.SetOffers(app.OfferedModes(), app.ModesNote);
             AddPage("Modos", "Modos", new HostPage(modes,
-                delegate(bool active) { if (active) modes.RefreshState(); }, null, null));
+                delegate(bool active)
+                {
+                    // Active: sample CPU/GPU so a mode switch can be proven (TelemetryHub).
+                    if (active) { app.Telemetry.Acquire(modes, false); modes.RefreshState(); }
+                    else app.Telemetry.Release(modes);
+                },
+                delegate(bool active) { if (active) modes.RefreshInsights(); }, null));
 
             // Fans: every delegate runs here on the UI thread, like fan.Tick. Manual/Curva/Máximo
             // only after the hardware validation passed (otherwise Automático only).
             fans = new FanPage(app.Fan, app.Config, delegate { app.SaveConfigQuietly(); }, app.HottestTemp,
-                app.Config.ManualFanAllowed, app.SetFanMax, app.SetFanAuto, app.IsFanMax);
+                app.Config.ManualFanAllowed && !app.ReadOnly, app.SetFanMax, app.SetFanAuto, app.IsFanMax);
+            fans.LockedNote = app.FanLockedNote;
+            fans.BusyReason = delegate { return app.EnvOwnsFirmware ? "O teste de ambiente está usando as ventoinhas: aguarde ele terminar." : null; };
             fans.ModeChosen += app.OnFanModeChosen;
             AddPage("Ventoinha", "Ventoinha", new HostPage(fans,
                 delegate(bool active) { if (active) fans.RefreshState(); },
@@ -155,11 +171,37 @@ namespace Forja.App
         }
         public bool FanMaxActive { get { return fans.MaxActive; } }
 
+        // The ownership of the firmware changed: the Modos page shows or drops its "wait" note.
+        public void RefreshModes()
+        {
+            modes.RefreshState();
+        }
+
+        // After the environment test: the Modos page and the Ventoinha page follow the new profile.
+        public void ApplyCapabilities()
+        {
+            modes.SetOffers(app.OfferedModes(), app.ModesNote);
+            fans.ApplyCapabilities(app.Config.ManualFanAllowed && !app.ReadOnly, app.FanLockedNote, app.Config.EnvFanLayout);
+            UpdateStrip();
+        }
+
         // Tray "Modo" items: same path as the cards (one-time Desempenho warning included).
         public void ChooseMode(PerfMode m)
         {
+            perfWarningDeclined = false;
             modes.Choose(m);
             UpdateStrip();
+            // The tray has no message line: a mode that did not take effect is told by an alert. Nothing is
+            // said when the user declined the warning or read-only mode blocked it on purpose.
+            if (!app.ReadOnly && !perfWarningDeclined && app.CurrentMode != m)
+            {
+                app.OnTrayCommandFailed("trocar para o modo " + ModeName(m), "Modos");
+            }
+        }
+
+        private static string ModeName(PerfMode m)
+        {
+            return ModeCatalog.Name(m);
         }
 
         // Tray "Ventoinha" items: same path as the page's tabs.
@@ -168,6 +210,7 @@ namespace Forja.App
             fans.ChooseAuto();
             UpdateStrip();
             app.UpdatePollRate();
+            if (!app.Fan.FirmwareAutoConfirmed) app.OnTrayCommandFailed("voltar a ventoinha ao automático", "Ventoinha");
         }
 
         public void ChooseFanMax()
@@ -175,11 +218,16 @@ namespace Forja.App
             fans.ChooseMax();
             UpdateStrip();
             app.UpdatePollRate();
+            if (app.Config.ManualFanAllowed && !app.ReadOnly && !FanMaxActive) app.OnTrayCommandFailed("ativar a ventoinha no máximo", "Ventoinha");
         }
+
+        private bool perfWarningDeclined;
 
         private bool ConfirmPerfWarning(string text)
         {
-            return Ask(text, "Modo Desempenho", MessageBoxButtons.OKCancel, MessageBoxDefaultButton.Button2) == DialogResult.OK;
+            bool ok = Ask(text, "Modo Desempenho", MessageBoxButtons.OKCancel, MessageBoxDefaultButton.Button2) == DialogResult.OK;
+            if (!ok) perfWarningDeclined = true;
+            return ok;
         }
 
         // Warning box owned by this window when visible; when hidden (tray action) by a
@@ -241,7 +289,11 @@ namespace Forja.App
             if (want == activePage) return;
             if (activePage != null) activePage.SetActive(false);
             activePage = want;
-            if (activePage != null) activePage.SetActive(true);
+            if (activePage != null)
+            {
+                activePage.SetActive(true);
+                app.AlertsPageShown(current); // the page is on screen now: its alerts count as seen
+            }
         }
 
         public void NotifyFirmwareTick()
@@ -250,12 +302,12 @@ namespace Forja.App
             UpdateStrip();
         }
 
-        // Verdict, crash summary and MODO / VENTOINHA telemetry (UI thread, cheap: cached values).
+        // "Estável" / "Requer sua atenção" and MODO / VENTOINHA telemetry (UI thread, cheap: cached values).
+        // No crash or restart text here: that lives in Saúde and in the one-time alert.
         public void UpdateStrip()
         {
-            SensorReading r = app.Latest;
-            strip.UpdateTemps(r.CpuTempC, monitor.GpuTempFor(r), false);
-            strip.Detail = app.StabilityDetail;
+            strip.SetState(app.StripState, app.AttentionIsCritical, app.AttentionReason, app.StripReadingGrace);
+            strip.Detail = app.ReadOnly ? SafetyText.ReadOnlyBanner : "";
             strip.SetTelemetry("Modo", app.ModeLabel, "Ventoinha", fans.ModeLabel);
         }
 

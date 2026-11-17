@@ -193,9 +193,10 @@ namespace Forja.App
             return result;
         }
 
-        private static AutoCheck Firmware(string name, Func<WmiFirmware, AutoCheck> use)
+        // Reads only; wrapped anyway so that every firmware object of the app comes from Safety.Wrap.
+        private static AutoCheck Firmware(string name, Func<GuardedFirmware, AutoCheck> use)
         {
-            WmiFirmware fw = new WmiFirmware();
+            GuardedFirmware fw = Safety.Wrap(new WmiFirmware());
             if (!fw.Available) return new AutoCheck(name, AutoStatus.Falhou, "o firmware não respondeu (o app precisa estar como administrador)");
             return use(fw);
         }
@@ -205,15 +206,15 @@ namespace Forja.App
             List<Step> l = new List<Step>();
             l.Add(new Step("Sensores", 15, delegate(CancellationToken ct)
             {
-                return Firmware("Sensores", delegate(WmiFirmware fw) { return AutoChecks.Sensors(fw.ReadSensors()); });
+                return Firmware("Sensores", delegate(GuardedFirmware fw) { return AutoChecks.Sensors(fw.ReadSensors()); });
             }));
             l.Add(new Step("Leitura do modo", 15, delegate(CancellationToken ct)
             {
-                return Firmware("Leitura do modo", delegate(WmiFirmware fw) { return AutoChecks.ModeRead(fw.GetMode()); });
+                return Firmware("Leitura do modo", delegate(GuardedFirmware fw) { return AutoChecks.ModeRead(fw.GetMode()); });
             }));
             l.Add(new Step("Estado das ventoinhas", 15, delegate(CancellationToken ct)
             {
-                return Firmware("Estado das ventoinhas", delegate(WmiFirmware fw)
+                return Firmware("Estado das ventoinhas", delegate(GuardedFirmware fw)
                 {
                     FanMode? cpu, gpu;
                     bool read = fw.GetFanBehavior(out cpu, out gpu);
@@ -234,7 +235,8 @@ namespace Forja.App
             l.Add(new Step("Limpeza de RAM", 20, delegate(CancellationToken ct)
             {
                 // Off unless --com-limpeza-ram was typed (--auto never turns it on).
-                if (!withRamClean) return AutoChecks.RamSkipped();
+                // Also skipped in diagnostic read-only mode (RAM cleaning is blocked there).
+                if (!withRamClean || Safety.ReadOnlyRequestedFromDisk()) return AutoChecks.RamSkipped();
                 return AutoChecks.Ram(RamCleaner.CleanDetailed(), Cleaner.IsElevated());
             }));
             l.Add(new Step("Tecla de hardware (hook)", 10, delegate(CancellationToken ct)

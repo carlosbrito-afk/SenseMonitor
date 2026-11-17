@@ -44,6 +44,9 @@ namespace Forja.App
         // --auto: nobody is at the screen, so the crash path shows no dialog and exits.
         internal static volatile bool Unattended;
 
+        // True once the crash path started (the update "started ok" flag is never written then).
+        internal static bool IsCrashing { get { return Thread.VolatileRead(ref crashing) != 0; } }
+
         public static string LogPath
         {
             get
@@ -52,9 +55,38 @@ namespace Forja.App
             }
         }
 
+        // LOAD_LIBRARY_SEARCH_SYSTEM32: from here on LoadLibrary and P/Invoke no longer search the exe's
+        // folder or the current directory (a downloaded exe sits in a folder anybody can write to).
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetDefaultDllDirectories(uint directoryFlags);
+        private const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
+
         [STAThread]
         public static void Main()
         {
+            try { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32); }
+            catch (Exception) { } // an OS without the API simply keeps the default search
+            // An elevated process that runs from outside the install folder looks for no satellite resource folder
+            // (<exe folder>\<culture>\): the invariant UI culture. All the app's text is hard-coded pt-BR, so nothing shown changes.
+            try
+            {
+                if (CulturePolicy.UseInvariantUi(InstallSystem.IsElevated(), UpdatePolicy.IsInstalledCopy(Application.ExecutablePath, InstallPaths.InstalledExe)))
+                {
+                    System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+                    Thread.CurrentThread.CurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+                }
+            }
+            catch (Exception) { }
+            UpdateLog.Fallback = LogLine;
+
+            // The fan sentinel and its launcher are windowless helper modes of this exe (see Sentinel).
+            int sentinelExit;
+            if (Sentinel.TryDispatch(Environment.GetCommandLineArgs(), out sentinelExit))
+            {
+                Environment.ExitCode = sentinelExit;
+                return;
+            }
+
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { Crash(e.Exception, true); };
             AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Crash(e.ExceptionObject as Exception, false); };
@@ -64,6 +96,12 @@ namespace Forja.App
             //   --validar-ventoinha [pct] hardware validation of fan control and modes, run once
             //                             with the user present; unlocks Manual/Curva/Máximo
             string[] args = Environment.GetCommandLineArgs();
+            // Install / uninstall / update-apply family (--instalar, --desinstalar, --aplicar-atualizacao,
+            // and the "install it?" offer): decided in Core, run by InstallTool (new files).
+            StartupRoute route = StartupRouter.Decide(args, Application.ExecutablePath, InstallPaths.InstalledExe, File.Exists(InstallPaths.InstalledExe));
+            // Before anything is elevated (the manifest is asInvoker): install checks, UAC question, relaunch.
+            if (FirstStageRunner.Run(args, route)) return;
+            if (route.Action != StartupAction.RunApp && InstallTool.Handle(route)) return;
             // Started by --autoteste to prove that a second copy is turned away: exit code 0 =
             // the single-instance mutex was already taken (turned away), 1 = it was free.
             if (ToolArgs.Has(args, AutoProbes.ProbeSwitch))
@@ -75,7 +113,7 @@ namespace Forja.App
             }
             if (HasArg(args, "--registrar-inicio"))
             {
-                string error = Autostart.Enable();
+                string error = InstallTasks.RegisterAll(); // autostart + fan sentinel + update helper tasks
                 LogLine(error == null ? "Inicialização automática registrada para " + InstallPaths.InstalledExe : "Inicialização automática: " + error);
                 Environment.ExitCode = error == null ? 0 : 1;
                 return;
@@ -87,11 +125,20 @@ namespace Forja.App
                 Environment.ExitCode = FanValidationTool.Run(PctArg(args, "--validar-ventoinha", 50));
                 return;
             }
+            //   --teste-ambiente          the environment test wizard (support): detection, conflicts, key,
+            //                             fans and modes of this notebook; saves the profile in config.json
             //   --teste-desempenho [--auto]  proves whether each mode changes performance, heat and
             //                                noise (6-8 min, CPU at 100 %); ends in Dia a dia + Automático
             //   --autoteste [--auto]         checks that every function works here (about 1 min,
             //                                nothing permanent); --auto = no dialog at all, exit 0 =
             //                                ran to the end, nonzero = could not run / stopped
+            if (ToolArgs.Has(args, "--teste-ambiente"))
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Environment.ExitCode = EnvWizardTool.Run();
+                return;
+            }
             bool perf = ToolArgs.Has(args, "--teste-desempenho");
             bool self = ToolArgs.Has(args, "--autoteste");
             if (perf || self)
@@ -188,6 +235,13 @@ namespace Forja.App
             {
                 FanValidationTool.CancelCurrent();
                 FanSafety.SetAutoIsolated(2500);
+            }
+            else if (EnvWizardTool.Active != null)
+            {
+                // The environment wizard of a standalone run: stop its fan/mode test, then the isolated safe state.
+                EnvWizardTool.CancelCurrent();
+                EnvWizardTool.RestoreCurrent(); // only what the wizard touched
+
             }
             else if (PerfTesting)
             {

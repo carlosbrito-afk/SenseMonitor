@@ -45,7 +45,20 @@ namespace Forja.Core
 
         public static string ScrubForCurrentUser(string text)
         {
-            return Scrub(text, SafeProfile(), SafeUser());
+            return ScrubMachineName(Scrub(text, SafeProfile(), SafeUser()), SafeMachine());
+        }
+
+        // The computer name as a whole word (it identifies the person as much as the user name does).
+        public static string ScrubMachineName(string text, string machine)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(machine) || machine.Length < 3) return text ?? "";
+            return Regex.Replace(text, @"(?<![A-Za-z0-9_-])" + Regex.Escape(machine) + @"(?![A-Za-z0-9_-])", "%COMPUTERNAME%", RegexOptions.IgnoreCase);
+        }
+
+        private static string SafeMachine()
+        {
+            try { return Environment.MachineName; }
+            catch (Exception) { return null; }
         }
 
         private static string SafeProfile()

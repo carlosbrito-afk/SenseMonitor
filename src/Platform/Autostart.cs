@@ -51,6 +51,83 @@ namespace Forja.Platform
             return sb.ToString();
         }
 
+        // ---- the fan sentinel's own task ---------------------------------------------------------
+        // A second, on-demand task (no trigger) that runs "SenseMonitor.exe --sentinela". The app starts
+        // it with schtasks /Run. It must be a task of its own: a process started by the app lives in
+        // the app task's job object and dies with it ("End" in Task Scheduler), exactly when the
+        // sentinel is needed. Same battery-safe settings, same elevation as the autostart task.
+        public const string SentinelTaskName = "SenseMonitor-Sentinela";
+        public const string SentinelSwitch = "--sentinela";
+
+        public static string BuildSentinelTaskXml(string exePath, string userId)
+        {
+            string user = SecurityElement.Escape(userId);
+            string cmd = SecurityElement.Escape("\"" + exePath + "\"");
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
+            sb.AppendLine("<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">");
+            sb.AppendLine("  <Principals><Principal id=\"Author\"><UserId>" + user + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>");
+            sb.AppendLine("  <Settings>");
+            sb.AppendLine("    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
+            sb.AppendLine("    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>");
+            sb.AppendLine("    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>");
+            sb.AppendLine("    <AllowHardTerminate>true</AllowHardTerminate>");
+            sb.AppendLine("    <StartWhenAvailable>false</StartWhenAvailable>");
+            sb.AppendLine("    <AllowStartOnDemand>true</AllowStartOnDemand>");
+            sb.AppendLine("    <Enabled>true</Enabled>");
+            sb.AppendLine("    <Hidden>true</Hidden>");
+            sb.AppendLine("    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+            sb.AppendLine("    <Priority>7</Priority>");
+            sb.AppendLine("  </Settings>");
+            sb.AppendLine("  <Actions Context=\"Author\"><Exec><Command>" + cmd + "</Command><Arguments>" + SentinelSwitch + "</Arguments></Exec></Actions>");
+            sb.AppendLine("</Task>");
+            return sb.ToString();
+        }
+
+        public static string BuildSentinelCreateArgs(string xmlPath)
+        {
+            return "/Create /TN " + SentinelTaskName + " /XML \"" + xmlPath + "\" /F";
+        }
+
+        public static string BuildRunSentinelArgs()
+        {
+            return "/Run /TN " + SentinelTaskName;
+        }
+
+        // Does the task definition (schtasks /Query /XML output) run exactly this exe with --sentinela?
+        // schtasks /Run says yes even for a task whose exe no longer exists, so this is checked first.
+        public static bool SentinelTaskIsCurrent(string taskXml, string exePath)
+        {
+            if (!TaskPointsTo(taskXml, exePath)) return false;
+            Match m = Regex.Match(taskXml, @"<Arguments>\s*(.*?)\s*</Arguments>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            return m.Success && string.Equals(m.Groups[1].Value.Trim(), SentinelSwitch, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Before /Run: the sentinel task must point at the installed exe; if it is missing or points
+        // elsewhere (moved or reinstalled app) it is registered again (the app is elevated). Returns
+        // null when the task is current or was just refreshed (refreshed = true), else a reason.
+        public static string EnsureSentinelTaskCurrent(out bool refreshed)
+        {
+            refreshed = false;
+            string exe = InstallPaths.InstalledExe;
+            if (!File.Exists(exe)) return NotInstalledText;
+            string output;
+            if (Run("/Query /TN " + SentinelTaskName + " /XML", out output) && SentinelTaskIsCurrent(output, exe)) return null;
+            string dir = InstallPaths.SecureTempDir();
+            if (dir == null) return NotInstalledText;
+            string error = EnableSentinelTask(dir, exe);
+            refreshed = error == null;
+            return error;
+        }
+
+        // Starts the sentinel task. true = schtasks accepted the request (the task exists); the caller
+        // still checks that the sentinel really came up.
+        public static bool RunSentinelTask()
+        {
+            string output;
+            return Run(BuildRunSentinelArgs(), out output);
+        }
+
         public static string BuildDeleteArgs()
         {
             return "/Delete /TN " + TaskName + " /F";
@@ -91,11 +168,34 @@ namespace Forja.Platform
                 string xml = BuildTaskXml(exe, WindowsIdentity.GetCurrent().Name);
                 File.WriteAllText(tmp, xml, Encoding.Unicode); // UTF-16 with BOM, as Task Scheduler expects
                 string output;
-                return Run(BuildCreateArgs(tmp), out output) ? null : "Não foi possível alterar a inicialização automática.";
+                if (!Run(BuildCreateArgs(tmp), out output)) return "Não foi possível alterar a inicialização automática.";
+                return EnableSentinelTask(dir, exe);
             }
             catch (Exception)
             {
                 return "Não foi possível alterar a inicialização automática.";
+            }
+            finally
+            {
+                try { if (tmp != null && File.Exists(tmp)) File.Delete(tmp); }
+                catch (Exception) { }
+            }
+        }
+
+        // Registers (or refreshes) the on-demand sentinel task next to the autostart task. null = ok.
+        private static string EnableSentinelTask(string dir, string exe)
+        {
+            string tmp = null;
+            try
+            {
+                tmp = XmlPathIn(dir);
+                File.WriteAllText(tmp, BuildSentinelTaskXml(exe, WindowsIdentity.GetCurrent().Name), Encoding.Unicode);
+                string output;
+                return Run(BuildSentinelCreateArgs(tmp), out output) ? null : "Não foi possível registrar o guardião da ventoinha.";
+            }
+            catch (Exception)
+            {
+                return "Não foi possível registrar o guardião da ventoinha.";
             }
             finally
             {

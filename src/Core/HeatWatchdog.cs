@@ -39,6 +39,7 @@ namespace Forja.Core
         private volatile bool readerBusy;
         private bool armed;
         private bool tripped;
+        private bool stopped;
         private string reason;
         private long lastGoodMs;
 
@@ -75,6 +76,7 @@ namespace Forja.Core
             {
                 armed = true;
                 tripped = false;
+                stopped = false;
                 reason = null;
                 lastGoodMs = nowMs();
             }
@@ -89,7 +91,9 @@ namespace Forja.Core
 
         public bool Tripped
         {
-            get { lock (gate) { return tripped; } }
+            // True only once the load has been told to stop (stopLoad returned), so a caller that
+            // sees Tripped can rely on the stop having happened.
+            get { lock (gate) { return stopped; } }
         }
 
         public string TripReason
@@ -107,6 +111,7 @@ namespace Forja.Core
             }
             try { stopLoad(); }
             catch (Exception) { }
+            lock (gate) { stopped = true; }
         }
 
         private void ReaderLoop()

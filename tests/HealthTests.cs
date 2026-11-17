@@ -461,18 +461,19 @@ namespace Forja.Tests
         private static readonly CultureInfo Br = new CultureInfo("pt-BR");
 
         [Test]
-        public static void Plural_BlueScreens()
+        public static void Plural_UnexpectedRestarts()
         {
-            Assert.Equal("1 tela azul", HealthFormat.BlueScreens(1));
-            Assert.Equal("3 telas azuis", HealthFormat.BlueScreens(3));
-            Assert.Equal("0 telas azuis", HealthFormat.BlueScreens(0));
+            Assert.Equal("1 reinício inesperado", HealthFormat.UnexpectedRestarts(1));
+            Assert.Equal("3 reinícios inesperados", HealthFormat.UnexpectedRestarts(3));
+            Assert.Equal("0 reinícios inesperados", HealthFormat.UnexpectedRestarts(0));
         }
 
         [Test]
-        public static void Plural_UnexpectedShutdowns()
+        public static void RestartBreakdown_OnlyTheKindsThatHappened()
         {
-            Assert.Equal("1 desligamento inesperado sem código", HealthFormat.UnexpectedShutdowns(1));
-            Assert.Equal("7 desligamentos inesperados sem código", HealthFormat.UnexpectedShutdowns(7));
+            Assert.Equal("2 falhas do sistema, 1 travamento, 4 quedas de energia, 1 sem detalhes", HealthFormat.RestartBreakdown(2, 1, 4, 1));
+            Assert.Equal("1 falha do sistema", HealthFormat.RestartBreakdown(1, 0, 0, 0));
+            Assert.Equal("", HealthFormat.RestartBreakdown(0, 0, 0, 0));
         }
 
         [Test]

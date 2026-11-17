@@ -53,9 +53,7 @@ namespace Forja.Core
 
         public static string ModeName(PerfMode m)
         {
-            if (m == PerfMode.Silencioso) return "Silencioso";
-            if (m == PerfMode.Desempenho) return "Desempenho";
-            return "Dia a dia";
+            return ModeCatalog.Name(m);
         }
 
         // "Dia a dia (1ª)" / "(2ª)" when the mode ran twice.

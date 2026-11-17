@@ -37,7 +37,7 @@ namespace Forja.App
                 },
                 delegate
                 {
-                    bool ok = FanSafety.SetAutoIsolated(IsolatedTimeoutMs);
+                    bool ok = IsolatedAuto();
                     if (ok) fan.NotifyFirmwareAuto();
                     return ok;
                 }).Confirmed;
@@ -67,7 +67,7 @@ namespace Forja.App
                 {
                     // Off the UI thread the controller must not be touched: isolated write now,
                     // controller state on the UI thread afterwards.
-                    bool ok = FanSafety.SetAutoIsolated(IsolatedTimeoutMs);
+                    bool ok = IsolatedAuto();
                     if (!ok) Program.LogLine("Ventoinhas: modo automático não confirmado ao suspender.");
                     PostToUi(delegate
                     {
@@ -108,7 +108,7 @@ namespace Forja.App
                 }
                 else
                 {
-                    if (!FanSafety.SetAutoIsolated(IsolatedTimeoutMs)) Program.LogLine("Ventoinhas: modo automático não confirmado no logoff.");
+                    if (!IsolatedAuto()) Program.LogLine("Ventoinhas: modo automático não confirmado no logoff.");
                     PostToUi(RequestExit);
                 }
             }
@@ -197,6 +197,7 @@ namespace Forja.App
             try
             {
                 ShutdownFans();
+                SafetyExit("fim da sessão do Windows");
                 StopMaintenance(2000);
                 tray.Visible = false;
             }
@@ -212,8 +213,11 @@ namespace Forja.App
         {
             try
             {
+                Safety.Journal.Write(JournalKind.State, "erro não tratado: devolvendo a ventoinha ao automático");
+                EnvWizardTool.CancelCurrent();
+                EnvWizardTool.RestoreCurrent(); // only what the wizard touched; nothing touched = no write
                 if (OnUiThread) ShutdownFans();
-                else FanSafety.SetAutoIsolated(IsolatedTimeoutMs);
+                else IsolatedAuto();
             }
             catch (Exception)
             {
@@ -225,13 +229,17 @@ namespace Forja.App
             if (cleanedUp) return;
             cleanedUp = true;
             exiting = true;
+            CancelEnvWizard();
             ShutdownFans();
+            StopUpdater();
             if (watchdogThread != null) watchdogThread.Dispose();
             StopMaintenance(3000);
             fwTimer.Dispose();
             trimTimer.Dispose();
+            if (telemetry != null) telemetry.Shutdown();
             try { if (!form.IsDisposed) form.CloseForExit(); }
             catch (Exception ex) { Program.LogError(ex); }
+            ShutdownGestures();
             if (keyHook != null) keyHook.Dispose();
             if (power != null) power.Dispose();
             SystemEvents.SessionSwitch -= OnSessionSwitch;
@@ -239,7 +247,9 @@ namespace Forja.App
             Application.ApplicationExit -= OnApplicationExit;
             tray.Visible = false;
             tray.Dispose();
+            DisposeAlerts();
             menu.Dispose();
+            SafetyExit("saída normal"); // before the instance mutex goes: a new app must not find its session flag cleared
             SingleInstance.Release();
             if (smallIcon != null) smallIcon.Dispose();
             if (largeIcon != null) largeIcon.Dispose();

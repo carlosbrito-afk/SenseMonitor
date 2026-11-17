@@ -126,5 +126,26 @@ namespace Forja.Tests
             string expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SenseMonitor", "config.json");
             Assert.Equal(expected, Config.DefaultPath);
         }
+
+        [Test]
+        public static void AutoUpdate_DefaultsOn_AndSurvivesRoundTrip_AndOldFilesLoadAsOn()
+        {
+            string path = TempPath();
+            try
+            {
+                Config d = Config.Load(path);
+                Assert.True(d.AutoUpdate && d.UpdateBalloon, "defaults on");
+                d.AutoUpdate = false;
+                d.UpdateBalloon = false;
+                d.Save(path);
+                Config r = Config.Load(path);
+                Assert.True(!r.AutoUpdate && !r.UpdateBalloon, "saved off");
+                // a config written before the updater existed has neither member
+                System.IO.File.WriteAllText(path, "{\"FanMode\":\"Auto\",\"LastPage\":\"Monitor\"}");
+                Config old = Config.Load(path);
+                Assert.True(old.AutoUpdate && old.UpdateBalloon, "old file: on");
+            }
+            finally { Cleanup(path); }
+        }
     }
 }
