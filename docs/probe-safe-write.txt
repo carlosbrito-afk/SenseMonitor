@@ -1,0 +1,7 @@
+Forja probe (somente Get*) 2026-11-16 18:59:54
+== ESCRITA SEGURA ==
+antes: misc 0xB = 0x0000000000000100, fan behavior(0x9) = 0x0000000000004100
+SetGamingMiscSetting(0x10B) -> retorno: gmOutput=0
+depois: misc 0xB = 0x0000000000000100
+SetGamingFanBehavior(0x410009) -> retorno: gmOutput=0
+depois: fan behavior(0x9) = 0x0000000000004100
