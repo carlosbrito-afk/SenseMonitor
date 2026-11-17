@@ -11,6 +11,12 @@ namespace Forja.App
     internal sealed class PaintSurface : Painted
     {
         public Action<Graphics, Rectangle> Painter;
+        // kind 0 = down, 1 = move, 2 = up
+        public Action<Point, int> Mouse;
+
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); if (Mouse != null && e.Button == MouseButtons.Left) Mouse(e.Location, 0); }
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (Mouse != null && e.Button == MouseButtons.Left) Mouse(e.Location, 1); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if (Mouse != null && e.Button == MouseButtons.Left) Mouse(e.Location, 2); }
 
         protected override void OnPaint(PaintEventArgs e)
         {

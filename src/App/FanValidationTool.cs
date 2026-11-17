@@ -58,7 +58,7 @@ namespace Forja.App
                 bool modesOk = EnvGate.ModesAnnounced(gateCfg.Env);
 
                 DialogResult go = MessageBox.Show(
-                    "Teste rápido das ventoinhas e dos modos (cerca de 45 segundos).\n\n"
+                    "Teste rápido das ventoinhas e dos modos (cerca de 30 segundos).\n\n"
                     + "• As ventoinhas vão mudar de velocidade e ficar no máximo por alguns segundos (barulho alto é normal).\n"
                     + "• O modo passa por Silencioso e Desempenho e termina em Dia a dia.\n"
                     + "• Se a temperatura chegar a 90 °C ou algo falhar, as ventoinhas voltam ao automático na hora.\n\n"

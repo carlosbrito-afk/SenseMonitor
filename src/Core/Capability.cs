@@ -41,6 +41,9 @@ namespace Forja.Core
         [DataMember] public string Id;
         [DataMember] public string State;
         [DataMember] public string Reason;
+        // When the guided test confirmed it (UTC, kept when a later run skips the step) and how: "manual" or "automático". null = not recorded.
+        [DataMember] public string Utc;
+        [DataMember] public string Method;
 
         public CapEntry()
         {

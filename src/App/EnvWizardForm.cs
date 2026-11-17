@@ -45,6 +45,7 @@ namespace Forja.App
         private readonly GhostButton btnSkip;
         private readonly GhostButton btnA;
         private readonly GhostButton btnB;
+        private readonly GhostButton btnC;
         private readonly FlatButton btnNext;
         private readonly System.Windows.Forms.Timer tick;
         private readonly HashSet<IWizardStep> done = new HashSet<IWizardStep>();
@@ -91,6 +92,10 @@ namespace Forja.App
             header.Painter = PaintHeader;
             body = new PaintSurface();
             body.Painter = PaintBody;
+            body.Mouse = delegate(Point pt, int kind)
+            {
+                if (current != null && !cancelling && current.Pointer(pt, kind)) Changed();
+            };
             Controls.Add(header);
             Controls.Add(body);
 
@@ -102,6 +107,8 @@ namespace Forja.App
             btnA.Click += delegate { if (!Busy && current != null) { current.ActionA(); Changed(); } };
             btnB = Ghost("");
             btnB.Click += delegate { if (!Busy && current != null) { current.ActionB(); Changed(); } };
+            btnC = Ghost("");
+            btnC.Click += delegate { if (!Busy && current != null) { current.ActionC(); Changed(); } };
             btnNext = new FlatButton();
             btnNext.Text = "Continuar";
             btnNext.Click += delegate { OnNext(); };
@@ -109,7 +116,11 @@ namespace Forja.App
             Controls.Add(btnSkip);
             Controls.Add(btnA);
             Controls.Add(btnB);
+            Controls.Add(btnC);
             Controls.Add(btnNext);
+            // The A/B action buttons sit inside the body's area: the body (added first, so in front) would
+            // otherwise cover them on screen (DrawToBitmap renders hide this).
+            body.SendToBack();
 
             tick = new System.Windows.Forms.Timer();
             tick.Interval = 60;
@@ -292,7 +303,10 @@ namespace Forja.App
             int aw = Math.Min(Theme.S(330), MeasureButton(btnA));
             btnA.SetBounds(pad, ay, aw, bh);
             int bw = Math.Min(Theme.S(330), MeasureButton(btnB));
-            btnB.SetBounds(aShown ? pad + aw + Theme.S(12) : pad, ay, bw, bh);
+            int bx = aShown ? pad + aw + Theme.S(12) : pad;
+            btnB.SetBounds(bx, ay, bw, bh);
+            int cw = Math.Min(Theme.S(330), MeasureButton(btnC));
+            btnC.SetBounds(btnB.Visible ? bx + bw + Theme.S(12) : bx, ay, cw, bh);
         }
 
         private static int MeasureButton(GhostButton b)
@@ -432,6 +446,7 @@ namespace Forja.App
         {
             if (which == "a") { if (!Busy && current != null && btnA.Enabled) { current.ActionA(); Changed(); } }
             else if (which == "b") { if (!Busy && current != null && btnB.Enabled) { current.ActionB(); Changed(); } }
+            else if (which == "c") { if (!Busy && current != null && btnC.Enabled) { current.ActionC(); Changed(); } }
             else if (which == "next") OnNext();
             else if (which == "skip") OnSkip();
         }
@@ -536,6 +551,9 @@ namespace Forja.App
             btnB.Visible = ui.BVisible;
             btnB.Text = ui.BText;
             btnB.Enabled = !busy && ui.BEnabled;
+            btnC.Visible = ui.CVisible;
+            btnC.Text = ui.CText;
+            btnC.Enabled = !busy && ui.CEnabled;
             btnCancel.Enabled = !cancelling;
             PerformLayout();
         }

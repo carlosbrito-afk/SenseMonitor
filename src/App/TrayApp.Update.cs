@@ -24,6 +24,14 @@ namespace Forja.App
         // Settings page: one line about the updater.
         public string UpdateStatus { get { return updater == null ? "" : updater.Status; } }
 
+        // Settings "Procurar agora". Null = a check started (watch UpdateStatus); otherwise why not.
+        internal string CheckUpdatesNow()
+        {
+            if (updater == null) return "O atualizador não está ativo.";
+            try { return updater.CheckNow(); }
+            catch (Exception ex) { Program.LogError(ex); return "Não foi possível verificar agora."; }
+        }
+
         internal bool IsExiting { get { return exiting || fansStopping; } }
 
         internal bool WindowVisible

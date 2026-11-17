@@ -34,7 +34,11 @@ namespace Forja.Platform
         // %APPDATA%\SenseMonitor, or the folder in SENSEMONITOR_DATA_DIR (lets a test run the helper
         // modes against an empty folder without touching the real journal and flags).
         // Test seam (the tests share the assembly): beats the environment variable.
-        internal static string DirOverride = null;
+        internal static string DirOverride
+        {
+            get { return UserData.Override; }
+            set { UserData.Override = value; }
+        }
 
         public static string Dir
         {
@@ -43,7 +47,7 @@ namespace Forja.Platform
                 if (!string.IsNullOrEmpty(DirOverride)) return DirOverride;
                 string over = Environment.GetEnvironmentVariable("SENSEMONITOR_DATA_DIR");
                 if (!string.IsNullOrEmpty(over)) return over;
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Display.AppName);
+                return UserData.Roaming;
             }
         }
 
@@ -82,17 +86,7 @@ namespace Forja.Platform
 
         private static bool IsTestHost()
         {
-            try
-            {
-                using (System.Diagnostics.Process p = System.Diagnostics.Process.GetCurrentProcess())
-                {
-                    return p.ProcessName.StartsWith("ForjaTests", StringComparison.OrdinalIgnoreCase);
-                }
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+            return UserData.IsTestHost;
         }
 
         // MachineFingerprint of this machine (model + BIOS), set once at start by the app and the tools; written

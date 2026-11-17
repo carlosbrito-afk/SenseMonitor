@@ -8,6 +8,15 @@ using Forja.Platform;
 
 namespace Forja.App
 {
+    // What this notebook was already proved to do (the saved profile and the Maximo reference of its fans); null when there is none
+    // (a first run, or the installer's run before a config exists).
+    internal sealed class PriorSnapshot
+    {
+        public CapabilityProfile Profile;
+        public int MaxRpmCpu;
+        public int MaxRpmGpu;
+    }
+
     // The outcome of the fan test step: the routine's report, or why it could not start.
     internal sealed class FanRun
     {
@@ -22,6 +31,8 @@ namespace Forja.App
     {
         bool ReadOnly { get; }
         string AppVersion { get; }
+        // The saved result of an earlier run, or null.
+        PriorSnapshot Prior { get; }
 
         // Read-only detection (worker thread).
         DetectionRaw Detect();
@@ -37,6 +48,14 @@ namespace Forja.App
         // The writing steps (worker thread). Every write goes through the guarded firmware: journal,
         // read-only mode, fan marker and the fan sentinel. Each step records what it touches BEFORE the first write.
         FanRun RunFanTest(FanLayout layout, Action<FanProgress> progress);
+        // Read-only (worker thread): up to 3 s of readings that say whether the temperatures guarding the fan test can be trusted.
+        // progress(reading number, elapsed ms).
+        SensorCheckResult CheckSensors(FanLayout layout, Action<int, int> progress);
+        // The manual fan test (worker thread): Custom on the chosen fan(s) through the guarded firmware, held and reported every second
+        // until StopManualFan (the user took the fans back), 90 C, a cancel or the hold limit; it always ends writing Automatico.
+        ManualFanResult RunManualFan(ManualFanTarget target, int pct, FanLayout layout, Action<ManualFanProgress> progress);
+        // Any thread: the user took the fans back to Automatico (the running manual test then writes it and returns).
+        void StopManualFan();
         void CancelFanTest();
         ModeTestOutcome RunModeTest(List<PerfMode> candidates, Func<PerfMode, bool> confirm, Action<ModeTestProgress> progress);
         void CancelModeTest();
@@ -92,9 +111,11 @@ namespace Forja.App
         private readonly EnvTouch touch = new EnvTouch();
         private readonly IModeMarker marker;
         private volatile FanValidationRunner fanRunner;
+        private readonly ManualFanControl manualControl = new ManualFanControl();
         private volatile ModeTestRunner modeRunner;
         private volatile bool testRunning;
         private PerfMode? detectedMode;
+        private PriorSnapshot prior;
         private bool owning;
 
         // cfg: the live config (the tray's own, or the one a standalone run loaded); null when the run
@@ -110,6 +131,13 @@ namespace Forja.App
             this.afterSave = afterSave;
             this.onOwnership = onOwnership;
             marker = Safety.ModeMarker; // modo-teste.flag in the verified state folder
+            if (!detached && cfg != null && cfg.Env != null)
+            {
+                prior = new PriorSnapshot();
+                prior.Profile = cfg.Env;
+                prior.MaxRpmCpu = cfg.FanMaxRpmCpu;
+                prior.MaxRpmGpu = cfg.FanMaxRpmGpu;
+            }
             if (detached)
             {
                 undoStore = new UndoStore();
@@ -124,6 +152,7 @@ namespace Forja.App
         }
 
         public bool ReadOnly { get { return readOnly; } }
+        public PriorSnapshot Prior { get { return prior; } }
 
         public string AppVersion
         {
@@ -275,6 +304,110 @@ namespace Forja.App
         {
             FanValidationRunner r = fanRunner;
             if (r != null) r.Cancel();
+            manualControl.Cancel(); // latched: also ends a manual run whose firmware is still being opened
+        }
+
+        public void StopManualFan()
+        {
+            manualControl.RequestStop(); // latched until the runner exists
+        }
+
+        // Reads only: nothing is written, so nothing is touched.
+        public SensorCheckResult CheckSensors(FanLayout layout, Action<int, int> progress)
+        {
+            GuardedFirmware fw = null;
+            try { fw = Safety.Wrap(new WmiFirmware()); }
+            catch (Exception) { fw = null; }
+            if (fw == null || !fw.Available)
+            {
+                SensorCheckResult r = new SensorCheckResult();
+                r.Reason = "o firmware não respondeu (o app precisa estar como administrador)";
+                return r;
+            }
+            return FanSensorCheck.Run(delegate { return fw.ReadSensors(); }, Thread.Sleep, layout, progress);
+        }
+
+        public ManualFanResult RunManualFan(ManualFanTarget target, int pct, FanLayout layout, Action<ManualFanProgress> progress)
+        {
+            ManualFanResult res = new ManualFanResult();
+            res.Target = target;
+            res.Pct = pct;
+            if (readOnly)
+            {
+                res.Error = "O modo somente leitura está ligado: o teste manual envia comandos ao firmware e não rodou.";
+                res.AutoConfirmed = true;
+                return res;
+            }
+            HeartbeatPump pump = null;
+            GuardedFirmware fw = null;
+            FanLayout previous = FanLayoutStore.CurrentIfSet;
+            testRunning = true;
+            // Recorded BEFORE the first write: cancel/exit/crash from here on hand the fans of this notebook back.
+            touch.TouchFans(layout);
+            try
+            {
+                Safety.EnsureSentinel = Sentinel.EnsureRunning; // the same guardian as every Custom write of the app
+                pump = new HeartbeatPump();
+                FanLayoutStore.Set(layout);
+                fw = Safety.Wrap(new WmiFirmware());
+                if (!fw.Available)
+                {
+                    res.Error = "O firmware não respondeu (o app precisa estar como administrador).";
+                    res.AutoConfirmed = true;
+                    touch.ClearFans();
+                    return res;
+                }
+                GuardedFirmware g = fw;
+                g.HandBackLayout = layout; // the marker covers the notebook's fans, not just the one this write addresses
+                ManualFanRunner runner = new ManualFanRunner(g, Thread.Sleep, layout);
+                runner.SetLayout = delegate(FanLayout l) { g.SetLayout(l); };
+                runner.AutoReadBack = delegate
+                {
+                    FanMode? c, gp;
+                    if (!g.GetFanBehavior(out c, out gp)) return null; // unreadable: not confirmed (the marker and the touched flag stay)
+                    return (!layout.Cpu || c == FanMode.Auto) && (!layout.Gpu || gp == FanMode.Auto);
+                };
+                runner.RefMaxCpu = prior == null ? 0 : prior.MaxRpmCpu;
+                runner.RefMaxGpu = prior == null ? 0 : prior.MaxRpmGpu;
+                runner.Progress = progress;
+                manualControl.Attach(runner); // a stop or cancel asked for before this point is applied now
+                Journal("ventoinha manual: " + target + " " + pct.ToString(CultureInfo.InvariantCulture) + "%");
+                res = runner.Run(target, pct);
+                Journal("ventoinha manual: " + (res.Applied ? "aplicado" : "não aplicado") + (res.StopReason != null ? "; " + res.StopReason : "; o usuário voltou ao automático")
+                    + "; automático " + (res.AutoConfirmed ? "confirmado" : "NÃO confirmado"));
+            }
+            catch (Exception ex)
+            {
+                res.Error = "Erro durante o teste (" + ex.GetType().Name + ").";
+            }
+            finally
+            {
+                bool autoConfirmed = res.AutoConfirmed;
+                if (!autoConfirmed)
+                {
+                    // one more try; "confirmed" still means the firmware's read-back says Automatico (the acceptance alone never is)
+                    try
+                    {
+                        if (fw != null && fw.Available)
+                        {
+                            fw.SetLayout(layout);
+                            bool accepted = fw.SetFanAuto();
+                            FanMode? c2, g2;
+                            bool? rb = fw.GetFanBehavior(out c2, out g2) ? (bool?)((!layout.Cpu || c2 == FanMode.Auto) && (!layout.Gpu || g2 == FanMode.Auto)) : null;
+                            autoConfirmed = ManualFanRunner.ConfirmedByReadBack(accepted, rb);
+                            res.AutoConfirmed = autoConfirmed;
+                        }
+                    }
+                    catch (Exception) { }
+                }
+                if (fw == null || autoConfirmed) touch.ClearFans();
+                if (previous == null) FanLayoutStore.Unset();
+                else FanLayoutStore.Set(previous);
+                manualControl.Detach();
+                testRunning = false;
+                if (pump != null) pump.Dispose();
+            }
+            return res;
         }
 
         public ModeTestOutcome RunModeTest(List<PerfMode> candidates, Func<PerfMode, bool> confirm, Action<ModeTestProgress> progress)

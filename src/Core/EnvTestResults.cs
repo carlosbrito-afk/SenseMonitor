@@ -17,6 +17,9 @@ namespace Forja.Core
         public string CandidateId;
         // The user said "my notebook does not have that key".
         public bool UserHasNoKey;
+        // Carried from an earlier run when the step was skipped as "already tested" (null = this run).
+        public string Utc;
+        public string Method;
     }
 
     public sealed class FanTestResult
@@ -25,6 +28,9 @@ namespace Forja.Core
         public bool CpuOk;
         public bool GpuOk;
         public string Reason;
+        // "automático" (the wizard's own sequence) or "manual" (the user drove it and confirmed); null = not recorded.
+        public string Method;
+        public string Utc;
         // Settled RPM at Máximo per fan (the RPM-response guard's reference).
         public int MaxRpmCpu;
         public int MaxRpmGpu;
@@ -37,6 +43,8 @@ namespace Forja.Core
         // The write was accepted and read back, AND the state really changed (a write that changes
         // nothing proves nothing: the firmware answers "ok" to anything).
         public bool Proven;
+        public string Utc;
+        public string Method;
     }
 
     // What the guided steps found, in one place.

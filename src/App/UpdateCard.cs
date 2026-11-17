@@ -40,7 +40,18 @@ namespace Forja.App
             };
             Controls.Add(auto);
             Controls.Add(balloon);
+            checkNow.Text = "Procurar agora";
+            checkNow.BackColor = Theme.Panel;
+            checkNow.Click += delegate
+            {
+                string why = app.CheckUpdatesNow();
+                if (why != null) { shownStatus = why; Invalidate(); }
+                else RefreshStatus();
+            };
+            Controls.Add(checkNow);
         }
+
+        private readonly GhostButton checkNow = new GhostButton();
 
         public static int PreferredHeight { get { return Theme.S(96); } }
 
@@ -58,6 +69,8 @@ namespace Forja.App
             int sw = Theme.S(46), sh = Theme.S(24);
             auto.SetBounds(Theme.S(20) + Theme.S(206), Theme.S(58), sw, sh);
             balloon.SetBounds(Width - Theme.S(20) - sw, Theme.S(58), sw, sh);
+            int bw = Theme.S(124);
+            checkNow.SetBounds(Width - Theme.S(20) - bw, Theme.S(31), bw, Theme.S(24));
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -72,7 +85,7 @@ namespace Forja.App
             Theme.Draw(g, "Versão " + AppVersion.Text, Theme.Font(10f, false), Theme.Text,
                 new Rectangle(inX + w / 2, Theme.S(10), w - w / 2, Theme.S(22)), TextFormatFlags.EndEllipsis | TextFormatFlags.Right);
             Theme.Draw(g, shownStatus.Length == 0 ? (app.UpdateStatus ?? "") : shownStatus, Theme.Font(9f, false), Theme.Muted,
-                new Rectangle(inX, Theme.S(32), w, Theme.S(22)), TextFormatFlags.EndEllipsis);
+                new Rectangle(inX, Theme.S(32), w - Theme.S(124) - Theme.S(10), Theme.S(22)), TextFormatFlags.EndEllipsis);
             Theme.Draw(g, "Atualizar automaticamente", Theme.Font(10f, false), Theme.Text,
                 new Rectangle(inX, Theme.S(60), Theme.S(200), Theme.S(22)), TextFormatFlags.EndEllipsis);
             int half = Width / 2;

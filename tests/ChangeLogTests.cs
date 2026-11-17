@@ -203,7 +203,8 @@ namespace Forja.Tests
         public static void Store_DefaultPath_IsUnderAppDataSenseMonitor()
         {
             string expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SenseMonitor", "historico.json");
-            Assert.Equal(expected, ChangeLogStore.DefaultPath);
+            Assert.Equal(expected, Path.Combine(UserData.RealRoaming, "historico.json"));
+            Assert.Equal(Path.Combine(UserData.Roaming, "historico.json"), ChangeLogStore.DefaultPath);
         }
 
         [Test]

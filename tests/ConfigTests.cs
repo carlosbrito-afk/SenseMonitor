@@ -123,8 +123,10 @@ namespace Forja.Tests
         [Test]
         public static void DefaultPath_IsUnderAppData()
         {
+            // the suite runs with the user folders redirected to a sandbox (SandboxTests): the real shape is checked without the redirect
             string expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SenseMonitor", "config.json");
-            Assert.Equal(expected, Config.DefaultPath);
+            Assert.Equal(expected, Path.Combine(UserData.RealRoaming, "config.json"));
+            Assert.Equal(Path.Combine(UserData.Roaming, "config.json"), Config.DefaultPath);
         }
 
         [Test]

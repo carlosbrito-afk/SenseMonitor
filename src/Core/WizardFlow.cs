@@ -185,6 +185,30 @@ namespace Forja.Core
             return "Modelo conhecido pela tabela (" + d.Table.Family + ", confiança " + conf + ").";
         }
 
+        // What the model table knows about the key, in one plain sentence, shown on the key step.
+        public static string KeyKnowledge(DetectionResult d)
+        {
+            if (d == null || d.Table == null)
+                return "Modelo fora da tabela do SenseMonitor: a tecla não está confirmada para este modelo. O teste abaixo mostra se ela responde.";
+            string code = d.Code ?? ModelTable.ExtractCode(d.Raw == null ? null : d.Raw.Model);
+            string name = d.Table.Family + (string.IsNullOrEmpty(code) ? "" : " (" + code + ")");
+            if (d.Table.Key == KeyKind.KeyboardKey)
+            {
+                if (d.Table.Confidence == 'A')
+                    return "Tecla confirmada no " + name + ": código conhecido (0x" + KeyCandidates.Ours.Vk.ToString("X2", CultureInfo.InvariantCulture)
+                        + " / 0x" + KeyCandidates.Ours.Scan.ToString("X2", CultureInfo.InvariantCulture) + ").";
+                return "Tecla esperada no " + name + ", ainda sem teste em hardware: não confirmada para este modelo.";
+            }
+            return KeyAdvice(d);
+        }
+
+        // "Já testada neste notebook em 17/11/2026" (+ how it was done when that was recorded).
+        public static string PriorText(PriorTest p, string noun)
+        {
+            if (p == null) return "";
+            return "Já " + noun + " neste notebook em " + p.DateText + (string.IsNullOrEmpty(p.Method) ? "" : " (teste " + p.Method + ")") + ".";
+        }
+
         // A note for the key step when the model is known not to send an ordinary key.
         public static string KeyAdvice(DetectionResult d)
         {

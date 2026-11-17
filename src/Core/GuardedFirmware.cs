@@ -92,13 +92,22 @@ namespace Forja.Core
         // MachineFingerprint written into the fan marker (so a marker that roams to another notebook is never replayed).
         public string Fingerprint;
 
+        // The fans the marker must cover whatever a single write addresses (the wizard's manual test writes one fan at a time but may
+        // leave others off Automático): the notebook's own fans. null = the layout of the firmware at the time of the write.
+        public FanLayout HandBackLayout;
+
         // Raises the fan marker recording which fans the next write addresses (the layout of the firmware) and which machine.
+        // The marker is a union: an existing one is widened, never narrowed, while any fan may be off Automático.
         private bool RaiseMarker()
         {
             IFanMarker fm = marker as IFanMarker;
             if (fm == null) return marker.Set();
             IFirmwareLayout l = inner as IFirmwareLayout;
-            return fm.Set(l == null ? FanLayout.Both : (l.Layout ?? FanLayout.Both), Fingerprint);
+            FanLayout now = l == null ? FanLayout.Both : (l.Layout ?? FanLayout.Both);
+            string text = FanMarkerData.Union(FanMarkerData.LayoutText(now), HandBackLayout == null ? null : FanMarkerData.LayoutText(HandBackLayout));
+            FanMarkerData u = new FanMarkerData();
+            u.Layout = text;
+            return fm.Set(u.GetLayout() ?? now, Fingerprint);
         }
 
         // Which fans the firmware commands address from now on (no-op for a firmware that has no layout).
@@ -288,7 +297,8 @@ namespace Forja.Core
         // The marker first, then the sentinel; either failing refuses the write (fail closed).
         private bool PrepareCustom(string what)
         {
-            if (marker != null && !marker.IsSet && !RaiseMarker())
+            // a fan marker is re-raised on every Custom write: an existing one is widened to cover this write too
+            if (marker != null && (marker is IFanMarker || !marker.IsSet) && !RaiseMarker())
             {
                 journal.Write(JournalKind.Blocked, what + ": recusado, o marcador de ventoinha manual não pôde ser gravado");
                 return false;

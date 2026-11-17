@@ -33,7 +33,7 @@ namespace Forja.Platform
         {
             get
             {
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Display.AppName, "diario.log");
+                return Path.Combine(UserData.Roaming, "diario.log");
             }
         }
 

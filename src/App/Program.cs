@@ -51,7 +51,7 @@ namespace Forja.App
         {
             get
             {
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Display.AppName, "erro.log");
+                return Path.Combine(UserData.Roaming, "erro.log");
             }
         }
 

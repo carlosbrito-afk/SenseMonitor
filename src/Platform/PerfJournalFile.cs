@@ -24,7 +24,7 @@ namespace Forja.Platform
 
         public static string DefaultPath()
         {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Display.AppName, PerfJournal.FileName);
+            return Path.Combine(UserData.Roaming, PerfJournal.FileName);
         }
 
         public void Write(string kind, string detail)

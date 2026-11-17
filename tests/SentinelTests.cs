@@ -826,6 +826,7 @@ namespace Forja.Tests
         public static void SentinelRun_NoAppAndNoMarker_LeavesAndJournals_WithoutTheRealMutexes()
         {
             string dir = SafetyTests.TempDir();
+            string savedDir = Safety.DirOverride;
             try
             {
                 Safety.DirOverride = dir;
@@ -840,7 +841,7 @@ namespace Forja.Tests
             }
             finally
             {
-                Safety.DirOverride = null;
+                Safety.DirOverride = savedDir;
                 Safety.SetSource(Safety.SourceApp);
                 Directory.Delete(dir, true);
             }
@@ -850,6 +851,7 @@ namespace Forja.Tests
         public static void SentinelRun_ASecondSentinel_LeavesWithoutDoingAnything()
         {
             string dir = SafetyTests.TempDir();
+            string savedDir = Safety.DirOverride;
             string name = Unique("sentinel");
             Mutex held = new Mutex(true, name);
             try
@@ -863,7 +865,7 @@ namespace Forja.Tests
             {
                 held.ReleaseMutex();
                 held.Close();
-                Safety.DirOverride = null;
+                Safety.DirOverride = savedDir;
                 Safety.SetSource(Safety.SourceApp);
                 Directory.Delete(dir, true);
             }

@@ -210,23 +210,42 @@ namespace Forja.Tests
 
     public static class KeyVaultTests
     {
+        private const int Fast = 1000; // injected floor + count: keeps the suite fast
         private const string Pass = "correct horse battery staple";
         private const string Key = "<RSAKeyValue><Modulus>AAAA</Modulus><Exponent>AQAB</Exponent><P>pp</P><Q>qq</Q><" + "D>dd</" + "D></RSAKeyValue>";
 
         [Test]
+        public static void ProductionConstants_AreUnchanged()
+        {
+            Assert.Equal(600000, KeyVault.DefaultIterations);
+            Assert.Equal(200000, KeyVault.MinIterations);
+        }
+
+        [Test]
+        public static void FileWrittenWithNIterations_RoundTrips_AndStoresN()
+        {
+            byte[] file = KeyVault.Protect(Key, Pass, 1234, Fast);
+            Assert.Equal(1234, (file[4] << 24) | (file[5] << 16) | (file[6] << 8) | file[7]);
+            string err;
+            Assert.Equal(Key, KeyVault.Unprotect(file, Pass, out err, Fast));
+            // the public (production) reader refuses it: below the real minimum
+            Assert.Null(KeyVault.Unprotect(file, Pass, out err));
+        }
+
+        [Test]
         public static void ProtectUnprotect_RoundTrips()
         {
-            byte[] file = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(Key, Pass, Fast, Fast);
             string err;
-            Assert.Equal(Key, KeyVault.Unprotect(file, Pass, out err));
+            Assert.Equal(Key, KeyVault.Unprotect(file, Pass, out err, Fast));
             Assert.Null(err);
         }
 
         [Test]
         public static void TheFileHoldsNoPlaintext_AndEachProtectionDiffers()
         {
-            byte[] a = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
-            byte[] b = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] a = KeyVault.Protect(Key, Pass, Fast, Fast);
+            byte[] b = KeyVault.Protect(Key, Pass, Fast, Fast);
             string text = Encoding.UTF8.GetString(a);
             Assert.True(text.IndexOf("RSAKeyValue", StringComparison.Ordinal) < 0 && text.IndexOf("Modulus", StringComparison.Ordinal) < 0, "no plaintext markers");
             Assert.True(Convert.ToBase64String(a) != Convert.ToBase64String(b), "random salt and iv");
@@ -236,39 +255,39 @@ namespace Forja.Tests
         [Test]
         public static void WrongPassphrase_IsRefused()
         {
-            byte[] file = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(Key, Pass, Fast, Fast);
             string err;
-            Assert.Null(KeyVault.Unprotect(file, "another long passphrase", out err));
+            Assert.Null(KeyVault.Unprotect(file, "another long passphrase", out err, Fast));
             Assert.True(err != null, "error");
-            Assert.Null(KeyVault.Unprotect(file, "", out err));
-            Assert.Null(KeyVault.Unprotect(file, null, out err));
+            Assert.Null(KeyVault.Unprotect(file, "", out err, Fast));
+            Assert.Null(KeyVault.Unprotect(file, null, out err, Fast));
         }
 
         [Test]
         public static void AnyAlteredByte_IsRefused()
         {
-            byte[] file = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(Key, Pass, Fast, Fast);
             int[] spots = { 9, 24, 40, file.Length - 40, file.Length - 1 };
             foreach (int at in spots)
             {
                 byte[] t = (byte[])file.Clone();
                 t[at] ^= 0x01;
                 string err;
-                Assert.Null(KeyVault.Unprotect(t, Pass, out err));
+                Assert.Null(KeyVault.Unprotect(t, Pass, out err, Fast));
             }
         }
 
         [Test]
         public static void TruncatedOrForeignFile_IsRefused()
         {
-            byte[] file = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(Key, Pass, Fast, Fast);
             string err;
             byte[] cut = new byte[file.Length - 3];
             Array.Copy(file, cut, cut.Length);
-            Assert.Null(KeyVault.Unprotect(cut, Pass, out err));
-            Assert.Null(KeyVault.Unprotect(new byte[10], Pass, out err));
-            Assert.Null(KeyVault.Unprotect(null, Pass, out err));
-            Assert.Null(KeyVault.Unprotect(Encoding.UTF8.GetBytes(Key), Pass, out err));
+            Assert.Null(KeyVault.Unprotect(cut, Pass, out err, Fast));
+            Assert.Null(KeyVault.Unprotect(new byte[10], Pass, out err, Fast));
+            Assert.Null(KeyVault.Unprotect(null, Pass, out err, Fast));
+            Assert.Null(KeyVault.Unprotect(Encoding.UTF8.GetBytes(Key), Pass, out err, Fast));
         }
 
         [Test]
@@ -276,10 +295,10 @@ namespace Forja.Tests
         {
             Assert.Throws<ArgumentException>(delegate { KeyVault.Protect(Key, Pass, KeyVault.MinIterations - 1); });
             // a file whose header was rewritten to a cheap iteration count (downgrade) is refused before any work
-            byte[] file = KeyVault.Protect(Key, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(Key, Pass, Fast, Fast);
             file[4] = 0; file[5] = 0; file[6] = 0; file[7] = 1;
             string err;
-            Assert.Null(KeyVault.Unprotect(file, Pass, out err));
+            Assert.Null(KeyVault.Unprotect(file, Pass, out err, Fast));
             Assert.True(err.Contains("iterações"), err);
         }
 
@@ -289,15 +308,15 @@ namespace Forja.Tests
             Assert.True(KeyVault.PassphraseProblem("short") != null, "short");
             Assert.True(KeyVault.PassphraseProblem(null) != null, "null");
             Assert.Null(KeyVault.PassphraseProblem("twelve chars!"));
-            Assert.Throws<ArgumentException>(delegate { KeyVault.Protect(Key, "short", KeyVault.MinIterations); });
+            Assert.Throws<ArgumentException>(delegate { KeyVault.Protect(Key, "short", Fast, Fast); });
         }
 
         [Test]
         public static void RealPrivateKey_SurvivesTheVault_AndStillSigns()
         {
-            byte[] file = KeyVault.Protect(TestKeys.PrivA, Pass, KeyVault.MinIterations);
+            byte[] file = KeyVault.Protect(TestKeys.PrivA, Pass, Fast, Fast);
             string err;
-            string back = KeyVault.Unprotect(file, Pass, out err);
+            string back = KeyVault.Unprotect(file, Pass, out err, Fast);
             byte[] data = Encoding.UTF8.GetBytes("manifest");
             string sig = UpdateSigner.Sign(data, back);
             Assert.Equal(SignatureCheck.Ok, UpdateVerifier.Verify(data, sig, TestKeys.PubA));

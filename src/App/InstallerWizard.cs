@@ -241,6 +241,10 @@ namespace Forja.App
     {
         public bool ReadOnly { get { return false; } }
         public string AppVersion { get { return null; } }
+        public PriorSnapshot Prior { get { return null; } }
+        public SensorCheckResult CheckSensors(FanLayout layout, Action<int, int> progress) { return new SensorCheckResult(); }
+        public ManualFanResult RunManualFan(ManualFanTarget target, int pct, FanLayout layout, Action<ManualFanProgress> progress) { return new ManualFanResult(); }
+        public void StopManualFan() { }
         public DetectionRaw Detect() { return new DetectionRaw(); }
         public List<ConflictItem> ScanConflicts() { return new List<ConflictItem>(); }
         public DisableOutcome DisableConflicts() { return new DisableOutcome(); }
@@ -272,6 +276,10 @@ namespace Forja.App
 
         public bool ReadOnly { get { return inner.ReadOnly; } }
         public string AppVersion { get { return inner.AppVersion; } }
+        public PriorSnapshot Prior { get { return inner.Prior; } }
+        public SensorCheckResult CheckSensors(FanLayout layout, Action<int, int> progress) { return inner.CheckSensors(layout, progress); }
+        public ManualFanResult RunManualFan(ManualFanTarget target, int pct, FanLayout layout, Action<ManualFanProgress> progress) { return inner.RunManualFan(target, pct, layout, progress); }
+        public void StopManualFan() { inner.StopManualFan(); }
         public DetectionRaw Detect() { return inner.Detect(); }
         public List<ConflictItem> ScanConflicts() { return inner.ScanConflicts(); }
         public DisableOutcome DisableConflicts() { return inner.DisableConflicts(); }

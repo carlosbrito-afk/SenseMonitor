@@ -27,9 +27,16 @@ namespace Forja.Core
 
         public static byte[] Protect(string privateKeyXml, string passphrase, int iterations)
         {
+            return Protect(privateKeyXml, passphrase, iterations, MinIterations);
+        }
+
+        // Tests only: lets the suite use a cheap iteration count. The production entry points above and
+        // below always pass MinIterations.
+        internal static byte[] Protect(string privateKeyXml, string passphrase, int iterations, int minIterations)
+        {
             if (string.IsNullOrEmpty(privateKeyXml)) throw new ArgumentException("chave vazia");
             if (PassphraseProblem(passphrase) != null) throw new ArgumentException(PassphraseProblem(passphrase));
-            if (iterations < MinIterations) throw new ArgumentException("iterações abaixo do mínimo");
+            if (iterations < minIterations) throw new ArgumentException("iterações abaixo do mínimo");
             byte[] salt = Random(SaltLen);
             byte[] iv = Random(IvLen);
             byte[] encKey, macKey;
@@ -66,12 +73,17 @@ namespace Forja.Core
         // deliberately not told apart.
         public static string Unprotect(byte[] file, string passphrase, out string error)
         {
+            return Unprotect(file, passphrase, out error, MinIterations);
+        }
+
+        internal static string Unprotect(byte[] file, string passphrase, out string error, int minIterations)
+        {
             error = null;
             int headLen = 4 + 4 + SaltLen + IvLen;
             if (file == null || file.Length < headLen + 16 + MacLen || file.Length > 64 * 1024) { error = "arquivo de chave inválido"; return null; }
             if (Encoding.ASCII.GetString(file, 0, 4) != Magic) { error = "arquivo de chave inválido"; return null; }
             int iterations = (file[4] << 24) | (file[5] << 16) | (file[6] << 8) | file[7];
-            if (iterations < MinIterations || iterations > 50000000) { error = "arquivo de chave inválido (iterações fora do limite)"; return null; }
+            if (iterations < minIterations || iterations > 50000000) { error = "arquivo de chave inválido (iterações fora do limite)"; return null; }
             byte[] salt = new byte[SaltLen], iv = new byte[IvLen];
             Buffer.BlockCopy(file, 8, salt, 0, SaltLen);
             Buffer.BlockCopy(file, 8 + SaltLen, iv, 0, IvLen);

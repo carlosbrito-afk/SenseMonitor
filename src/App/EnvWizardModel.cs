@@ -98,6 +98,9 @@ namespace Forja.App
         public bool BVisible;
         public string BText = "";
         public bool BEnabled = true;
+        public bool CVisible;
+        public string CText = "";
+        public bool CEnabled = true;
     }
 
     // The host form, as the steps see it.
@@ -150,6 +153,10 @@ namespace Forja.App
         StepUi Ui();
         void ActionA();
         void ActionB();
+        void ActionC();
+        // The mouse over the body (a step with its own sliders/chips): kind 0 = down, 1 = move, 2 = up; point in body coordinates.
+        // true = the step used it (the body is repainted).
+        bool Pointer(Point p, int kind);
         // "Fazer depois": records the step as skipped.
         void Skip();
         // The primary button. true = go to the next step.

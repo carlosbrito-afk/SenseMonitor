@@ -213,7 +213,22 @@ namespace Forja.App
 
         // ---- check -----------------------------------------------------------------------------
 
+        // Settings "Procurar agora": a check right away, ignoring the once-a-day schedule. Returns a
+        // message to show when nothing was started (null = a check is running; the status line follows it).
+        public string CheckNow()
+        {
+            if (!installedCopy || disabledReason != null) return Status;
+            if (Interlocked.CompareExchange(ref busy, 0, 0) != 0) return "Uma verificação já está em andamento…";
+            MaybeCheck(uptime.ElapsedMilliseconds, true);
+            return null;
+        }
+
         private void MaybeCheck(long up)
+        {
+            MaybeCheck(up, false);
+        }
+
+        private void MaybeCheck(long up, bool force)
         {
             string reason;
             string dir = UpdateStore.SecureStageDir(true, out reason);
@@ -230,7 +245,7 @@ namespace Forja.App
             }
             UpdateState state = UpdateStore.LoadState(dataDir);
             bool startup = !startupCheckDone;
-            if (!UpdateSchedule.IsDue(DateTime.UtcNow, state.LastCheckUtc, state.LastAttemptUtc, startup))
+            if (!force && !UpdateSchedule.IsDue(DateTime.UtcNow, state.LastCheckUtc, state.LastAttemptUtc, startup))
             {
                 // Not due (checked recently): the startup check has nothing to do.
                 startupCheckDone = true;

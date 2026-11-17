@@ -32,8 +32,7 @@ namespace Forja.Platform
 
         public static string DefaultDirectory()
         {
-            string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            return Path.Combine(Path.Combine(baseDir, "SenseMonitor"), "temperaturas");
+            return Path.Combine(UserData.Local, "temperaturas");
         }
 
         public string Directory

@@ -145,7 +145,7 @@ namespace Forja.Core
         {
             get
             {
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SenseMonitor", "config.json");
+                return Path.Combine(UserData.Roaming, "config.json");
             }
         }
 

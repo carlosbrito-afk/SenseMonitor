@@ -139,13 +139,63 @@ namespace Forja.Core
                 c.Reason = "a ventoinha não seguiu o comando de " + pctValue + "%";
                 return c;
             }
-            if (Math.Abs(a.Value - b.Value) > 0.5 * (m.Value - b.Value) && !SpinningDown(autoAgain, m.Value))
+            if (!ReturnedToAuto(autoAgain, b.Value, m.Value))
             {
                 c.Reason = "não voltou ao automático depois do teste";
                 return c;
             }
             c.Passed = true;
             return c;
+        }
+
+        // A phase is "settled" when the last SettleSamples readings agree within SettleTolerance (the fan reached its speed)
+        // and, when the phase is expected to move the fan away from reference, the speed really left it by MinMove.
+        // A fan that has not reacted yet (same readings as before the command) is not settled: the phase runs to its limit.
+        public const int SettleSamples = 3;
+        public const double SettleTolerance = 0.03;
+
+        public static bool Settled(List<int?> samples, int? reference)
+        {
+            if (samples == null || samples.Count < SettleSamples) return false;
+            int lo = int.MaxValue, hi = 0;
+            for (int i = samples.Count - SettleSamples; i < samples.Count; i++)
+            {
+                if (!samples[i].HasValue || samples[i].Value <= 0) return false;
+                lo = Math.Min(lo, samples[i].Value);
+                hi = Math.Max(hi, samples[i].Value);
+            }
+            if (hi - lo > SettleTolerance * hi) return false;
+            if (reference.HasValue && reference.Value > 0)
+            {
+                if (Math.Abs(samples[samples.Count - 1].Value - reference.Value) < MinMove * reference.Value) return false;
+            }
+            return true;
+        }
+
+        // After Automático the fan counts as returned when the TWO latest consecutive readings (both real, above 0) are back at
+        // least halfway from Máximo to the baseline, or the firmware is winding it down: both under SpinDownDrop below Máximo
+        // and falling. One spurious reading (a transient 0 from WMI) can never pass a fan stuck at Máximo.
+        public const int ReturnReadings = 2;
+
+        public static bool ReturnedToAuto(List<int?> autoAgain, int baseline, int max)
+        {
+            if (autoAgain == null || autoAgain.Count < ReturnReadings) return false;
+            int a = autoAgain.Count - ReturnReadings;
+            int[] v = new int[ReturnReadings];
+            for (int i = 0; i < ReturnReadings; i++)
+            {
+                int? s = autoAgain[a + i];
+                if (!s.HasValue || s.Value <= 0) return false;
+                v[i] = s.Value;
+            }
+            bool halfway = true, under = true;
+            foreach (int x in v)
+            {
+                if (Math.Abs(x - baseline) > 0.5 * (max - baseline)) halfway = false;
+                if (x > max * (1 - SpinDownDrop)) under = false;
+            }
+            if (halfway) return true;
+            return under && SpinningDown(autoAgain, max);
         }
 
         // The firmware winds a fan down from Máximo gradually: after Automático it counts as
@@ -192,7 +242,39 @@ namespace Forja.Core
         public int Percent;
         public int? CpuRpm;
         public int? GpuRpm;
+        public double? CpuTempC;
+        public double? GpuTempC;
         public string Text;
+        // The step the user sees: "Fase 2 de 4", its name, and the longest it can still take (a phase ends early once the fans settle).
+        public int PhaseNumber;
+        public int PhaseCount;
+        public string PhaseName;
+        public int PhaseElapsedMs;
+        public int PhaseMaxMs;
+
+        public int PhaseLeftMs { get { return Math.Max(0, PhaseMaxMs - PhaseElapsedMs); } }
+
+        public static int NumberOf(string phase)
+        {
+            switch (phase)
+            {
+                case "auto": return 1;
+                case "pct": return 2;
+                case "max": return 3;
+                default: return 4;
+            }
+        }
+
+        public static string NameFor(string phase, int pct)
+        {
+            switch (phase)
+            {
+                case "auto": return "Medindo o automático";
+                case "pct": return "Ventoinhas a " + pct.ToString(CultureInfo.InvariantCulture) + "%";
+                case "max": return "Ventoinhas no máximo";
+                default: return "Voltando ao automático";
+            }
+        }
 
         public static string TextFor(string phase, int pct)
         {
@@ -206,22 +288,24 @@ namespace Forja.Core
         }
     }
 
-    // The validation routine (run with the user present: SenseMonitor.exe --validar-ventoinha).
-    // Fans: Automático (baseline) -> Custom pct% -> Máximo -> Automático, ~8 s each, sampling the
-    // RPM every second. Any refused write, a temperature >= 90 °C or an exception stops it and
-    // writes Automático at once; the routine always ends in Automático.
+    // The validation routine (run with the user present: SenseMonitor.exe --validar-ventoinha, and the wizard's fan step).
+    // Fans: Automático (baseline) -> Custom pct% -> Máximo -> Automático, sampling the RPM every second. Each phase ends
+    // as soon as the fans settle (three readings within 3 %), up to its limit; the way back ends as soon as the fan is
+    // winding down or halfway back. Worst case 25 s, typically about 15 s. Any refused write, a temperature >= 90 °C or an
+    // exception stops it and writes Automático at once; the routine always ends in Automático.
     // Modes: Silencioso -> Dia a dia -> Desempenho -> Dia a dia, each read back after a pause.
     public sealed class FanValidationRunner
     {
-        public const int PhaseMs = 8000;
         public const int SampleMs = 1000;
-        public const int SettleMs = 2000;
-        public const int BaselineMs = 4000;
+        public const int BaselineMs = 3000;
+        public const int PctMaxMs = 6000;
+        public const int MaxPhaseMs = 6000;
+        public const int ReturnMaxMs = 10000;
         public const int ModePauseMs = 1500;
         public const double AbortTempC = 90;
 
-        // Total of the sleeps of RunFans (the progress bar's scale): settle + baseline + custom + max + 2 x auto.
-        public const int TotalMs = SettleMs + BaselineMs + PhaseMs + PhaseMs + 2 * PhaseMs;
+        // Worst case of the sleeps of RunFans (the progress bar's scale): baseline + custom + max + way back.
+        public const int TotalMs = BaselineMs + PctMaxMs + MaxPhaseMs + ReturnMaxMs;
 
         private readonly IFirmware fw;
         private readonly Func<bool> setFanMax;
@@ -229,9 +313,9 @@ namespace Forja.Core
         private readonly int pct;
         private readonly FanLayout layout;
         private int elapsedMs;
+        private int phaseBaseMs;
 
-        // Optional: told about every sample (the wizard's progress bar and "listen to the fans" text).
-        // A callback that throws never breaks the test.
+        // Optional: told about every sample (the wizard's progress panel). A callback that throws never breaks the test.
         public Action<FanProgress> Progress;
 
         public FanValidationRunner(IFirmware fw, Func<bool> setFanMax, Action<int> sleep, int pct)
@@ -284,28 +368,35 @@ namespace Forja.Core
             FanValidationReport rep = new FanValidationReport();
             rep.TestPct = pct;
             elapsedMs = 0;
+            phaseBaseMs = 0;
             bool autoConfirmed = false;
             Phase baseline = new Phase(), custom = new Phase(), max = new Phase(), again = new Phase();
             try
             {
                 CheckCancel();
                 if (!fw.SetFanAuto()) throw new AbortException("o firmware recusou o modo automático");
-                sleep(SettleMs);
-                elapsedMs += SettleMs;
-                Sample("auto", baseline, BaselineMs, rep);
+                Sample("auto", baseline, BaselineMs, rep, null);
+                int? bCpu = FanValidation.Median(baseline.Cpu, false);
+                int? bGpu = FanValidation.Median(baseline.Gpu, false);
 
                 autoConfirmed = false;
                 CheckCancel();
                 if (!fw.SetFanPercent(pct, pct)) throw new AbortException("o firmware recusou a velocidade de " + pct + "%");
-                Sample("pct", custom, PhaseMs, rep);
+                Sample("pct", custom, PctMaxMs, rep, delegate(Phase p) { return Both(p, bCpu, bGpu); });
+                int? pCpu = FanValidation.Median(custom.Cpu, true);
+                int? pGpu = FanValidation.Median(custom.Gpu, true);
 
                 CheckCancel();
                 if (!setFanMax()) throw new AbortException("o firmware recusou o Máximo");
-                Sample("max", max, PhaseMs, rep);
+                Sample("max", max, MaxPhaseMs, rep, delegate(Phase p) { return Both(p, pCpu, pGpu); });
+                int? mCpu = FanValidation.Median(max.Cpu, true);
+                int? mGpu = FanValidation.Median(max.Gpu, true);
 
                 autoConfirmed = fw.SetFanAuto();
                 if (!autoConfirmed) throw new AbortException("o firmware recusou a volta ao automático");
-                Sample("auto2", again, 2 * PhaseMs, rep); // gradual spin-down: watch it longer
+                // gradual spin-down: it ends as soon as the fans are winding down or halfway back
+                Sample("auto2", again, ReturnMaxMs, rep, delegate(Phase p) { return Returned(p, bCpu, bGpu, mCpu, mGpu); });
+                ReportDone();
             }
             catch (AbortException ex)
             {
@@ -333,10 +424,25 @@ namespace Forja.Core
             return rep;
         }
 
-        private void Sample(string name, Phase into, int durationMs, FanValidationReport rep)
+        // Every fan of the layout settled (and moved away from its reference).
+        private bool Both(Phase p, int? cpuRef, int? gpuRef)
+        {
+            return (!layout.Cpu || FanValidation.Settled(p.Cpu, cpuRef)) && (!layout.Gpu || FanValidation.Settled(p.Gpu, gpuRef));
+        }
+
+        // Every fan of the layout came back (halfway to the baseline or winding down from Máximo).
+        private bool Returned(Phase p, int? bCpu, int? bGpu, int? mCpu, int? mGpu)
+        {
+            return (!layout.Cpu || (bCpu.HasValue && mCpu.HasValue && FanValidation.ReturnedToAuto(p.Cpu, bCpu.Value, mCpu.Value)))
+                && (!layout.Gpu || (bGpu.HasValue && mGpu.HasValue && FanValidation.ReturnedToAuto(p.Gpu, bGpu.Value, mGpu.Value)));
+        }
+
+        // Samples every SampleMs up to limitMs; stops early when done(phase) says so (null = the whole time).
+        // The progress bar counts the phase's full limit once it ends, early or not.
+        private void Sample(string name, Phase into, int limitMs, FanValidationReport rep, Func<Phase, bool> done)
         {
             StringBuilder raw = new StringBuilder(name).Append(':');
-            for (int t = 0; t < durationMs; t += SampleMs)
+            for (int t = 0; t < limitMs; t += SampleMs)
             {
                 sleep(SampleMs);
                 CheckCancel();
@@ -362,24 +468,48 @@ namespace Forja.Core
                     rep.Raw.Add(raw.ToString());
                     throw new AbortException("temperatura chegou a " + ((int)hot).ToString(CultureInfo.InvariantCulture) + " °C (limite 90 °C)", true);
                 }
-                elapsedMs += SampleMs;
-                Report(name, c, g);
+                elapsedMs = phaseBaseMs + t + SampleMs;
+                Report(name, c, g, cpuT, gpuT, t + SampleMs, limitMs);
+                if (done != null && done(into)) break;
             }
             rep.Raw.Add(raw.ToString());
+            phaseBaseMs += limitMs;
+            elapsedMs = phaseBaseMs;
         }
 
-        private void Report(string phase, int? cpuRpm, int? gpuRpm)
+        // The routine ended: the bar is full whatever the early stops saved.
+        private void ReportDone()
         {
+            elapsedMs = TotalMs;
+            Report("auto2", lastCpu, lastGpu, lastCpuT, lastGpuT, ReturnMaxMs, ReturnMaxMs);
+        }
+
+        private int? lastCpu, lastGpu;
+        private double? lastCpuT, lastGpuT;
+
+        private void Report(string phase, int? cpuRpm, int? gpuRpm, double? cpuT, double? gpuT, int phaseElapsedMs, int phaseMaxMs)
+        {
+            lastCpu = cpuRpm;
+            lastGpu = gpuRpm;
+            lastCpuT = cpuT;
+            lastGpuT = gpuT;
             Action<FanProgress> cb = Progress;
             if (cb == null) return;
             FanProgress p = new FanProgress();
             p.Phase = phase;
             p.ElapsedMs = elapsedMs;
             p.TotalMs = TotalMs;
-            p.Percent = Math.Min(100, (int)Math.Round(100.0 * elapsedMs / TotalMs));
+            p.Percent = Math.Min(100, (int)Math.Round(100.0 * p.ElapsedMs / TotalMs));
             p.CpuRpm = cpuRpm;
             p.GpuRpm = gpuRpm;
+            p.CpuTempC = cpuT;
+            p.GpuTempC = gpuT;
             p.Text = FanProgress.TextFor(phase, pct);
+            p.PhaseNumber = FanProgress.NumberOf(phase);
+            p.PhaseCount = 4;
+            p.PhaseName = FanProgress.NameFor(phase, pct);
+            p.PhaseElapsedMs = phaseElapsedMs;
+            p.PhaseMaxMs = phaseMaxMs;
             try { cb(p); }
             catch (Exception) { }
         }

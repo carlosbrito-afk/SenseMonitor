@@ -23,7 +23,7 @@ namespace Forja.Platform
 
         public static string DefaultPath
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SenseMonitor", "estado"); }
+            get { return Path.Combine(UserData.Common, "estado"); }
         }
 
         // A path that was refused is not retried by this process: every retry would rename another folder aside and fill

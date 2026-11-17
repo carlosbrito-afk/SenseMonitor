@@ -105,7 +105,7 @@ namespace Forja.Platform
 
         public static string DataRoot
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SenseMonitor"); }
+            get { return UserData.Common; }
         }
 
         public static string DataDir

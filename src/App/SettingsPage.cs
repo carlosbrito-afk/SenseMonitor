@@ -338,10 +338,11 @@ namespace Forja.App
             int aw = alertsCard.Width - inX * 2 - Theme.S(60);
             Theme.Draw(g, "Alertas na bandeja", Theme.Font(11f, true), Theme.Text,
                 new Rectangle(alertsCard.X + inX, alertsCard.Y + Theme.S(6), aw, Theme.S(24)), TextFormatFlags.EndEllipsis);
-            Theme.Draw(g, "Balão e ponto colorido no ícone (o ponto aparece também com jogo em tela cheia). " + app.AlertSettingsModel.Summary(),
+            // one line, cut with an ellipsis at a word edge by the renderer: never clipped mid-glyph
+            Theme.Draw(g, "Balão e ponto colorido no ícone, também em tela cheia. " + app.AlertSettingsModel.Summary(),
                 Theme.Font(9f, false), Theme.Muted,
-                new Rectangle(alertsCard.X + inX, alertsCard.Y + Theme.S(30), alertsCard.Width - inX * 2, Theme.S(26)),
-                TextFormatFlags.EndEllipsis | TextFormatFlags.WordBreak);
+                new Rectangle(alertsCard.X + inX, alertsCard.Y + Theme.S(32), alertsCard.Width - inX * 2, Theme.S(20)),
+                TextFormatFlags.EndEllipsis);
             for (int i = 0; i < alertKinds.Length; i++)
             {
                 Theme.Draw(g, AlertLabels[i], Theme.Font(9f, false), alertKinds[i].Enabled ? Theme.Text : Theme.Dim,

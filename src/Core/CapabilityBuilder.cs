@@ -54,7 +54,29 @@ namespace Forja.Core
             BuildModes(p, d, t);
             BuildKey(p, d, t);
             FillAuxiliary(p, d);
+            Stamp(p, t, createdUtc);
             return p;
+        }
+
+        // When and how each guided capability was confirmed (what "Já testado neste notebook" shows later).
+        private static void Stamp(CapabilityProfile p, EnvTestResults t, string createdUtc)
+        {
+            StampOne(p, Cap.Key, t.Key.Utc, t.Key.Method, createdUtc);
+            StampOne(p, Cap.FanControl, t.Fan.Utc, t.Fan.Method, createdUtc);
+            foreach (PerfMode m in ModeCatalog.DisplayOrder)
+            {
+                ModeStepResult r = t.ModeResult(m);
+                StampOne(p, ModeCatalog.CapOf(m), r == null ? null : r.Utc, r == null ? null : r.Method, createdUtc);
+            }
+        }
+
+        private static void StampOne(CapabilityProfile p, Cap cap, string utc, string method, string createdUtc)
+        {
+            CapEntry e = p.Find(cap);
+            if (e == null || e.StateValue != CapState.Confirmed) return;
+            // Temperatures and fan reading are confirmed by reading, not by a guided test: only tests are stamped.
+            e.Utc = string.IsNullOrEmpty(utc) ? createdUtc : utc;
+            e.Method = method;
         }
 
         private static void FillAll(CapabilityProfile p, CapState s, string reason)

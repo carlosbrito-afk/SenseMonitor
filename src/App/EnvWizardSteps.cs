@@ -101,6 +101,8 @@ namespace Forja.App
         public virtual StepUi Ui() { return new StepUi(); }
         public virtual void ActionA() { }
         public virtual void ActionB() { }
+        public virtual void ActionC() { }
+        public virtual bool Pointer(Point p, int kind) { return false; }
         public virtual void Skip() { }
         public virtual bool Next() { return true; }
     }
@@ -346,6 +348,7 @@ namespace Forja.App
         private readonly KeyTestState state = new KeyTestState();
         private IDisposable listen;
         private int startTick;
+        private PriorTest prior;
 
         protected override WizardStep Id { get { return WizardStep.Key; } }
         public override string Key { get { return "key"; } }
@@ -354,6 +357,8 @@ namespace Forja.App
 
         protected override void OnEnter()
         {
+            PriorSnapshot snap = Sess.Svc.Prior;
+            prior = snap == null || Sess.Det == null ? null : PriorTests.Key(snap.Profile, Sess.Det.Fingerprint);
             Start();
         }
 
@@ -411,6 +416,7 @@ namespace Forja.App
         {
             StepUi u = new StepUi();
             u.SkipVisible = true;
+            if (prior != null) u.SkipText = "Pular (já testada)";
             u.BVisible = true;
             u.BText = "Meu notebook não tem essa tecla";
             u.BEnabled = phase != KeyPhase.NoKey && phase != KeyPhase.Done;
@@ -435,6 +441,12 @@ namespace Forja.App
         public override void Skip()
         {
             Stop();
+            if (prior != null && Sess.Svc.Prior != null)
+            {
+                // already proved on this notebook: skipping keeps it confirmed (same code, original date)
+                PriorTests.CarryKey(Sess.Results, Sess.Svc.Prior.Profile, prior);
+                return;
+            }
             Sess.Results.Key.Status = StepStatus.Skipped;
             Sess.Results.Key.CandidateId = null;
         }
@@ -503,8 +515,12 @@ namespace Forja.App
             }
             y += WizDraw.Para(g, status, Theme.Font(10.5f, false), sc, x, y, w) + WizUi.S(10);
 
-            string advice = Sess.Det == null ? "" : WizardText.KeyAdvice(Sess.Det);
-            if (advice.Length > 0 && y < limit - WizUi.S(30)) y += WizUi.Note(g, WizIcon.Wait, advice, Theme.Muted, x, y, w);
+            // what the model table knows (and what an earlier run on this notebook already proved)
+            string know = Sess.Det == null ? "" : WizardText.KeyKnowledge(Sess.Det);
+            if (know.Length > 0 && y < limit - WizUi.S(30))
+                y += WizUi.Note(g, know.StartsWith("Tecla confirmada") ? WizIcon.Ok : WizIcon.Wait, know, know.StartsWith("Tecla confirmada") ? Theme.Text : Theme.Muted, x, y, w);
+            if (prior != null && y < limit - WizUi.S(30))
+                y += WizUi.Note(g, WizIcon.Ok, WizardText.PriorText(prior, "testada") + " “Pular (já testada)” mantém a tecla confirmada.", Theme.Text, x, y, w);
             if (y < limit - WizUi.S(24))
                 WizUi.Note(g, WizIcon.Ok, "Só o código dessa tecla é observado. Nenhuma outra tecla é lida, registrada ou guardada.", Theme.Muted, x, Math.Min(y, limit - WizUi.S(26)), w);
         }
@@ -514,36 +530,180 @@ namespace Forja.App
 
     internal sealed class FanStep : CoreStep
     {
-        private enum Phase { Intro, Running, Done }
+        // Checking: "Conferindo os sensores…" (read-only, at most 3 s). CheckFailed: the temperatures cannot be trusted.
+        // Ready: the choice (automatic or manual). Running/Done: the automatic test. Manual*: the manual test.
+        private enum Phase { Checking, CheckFailed, Ready, Running, Done, ManualIdle, ManualHold, ManualStopping, ManualAfter }
 
-        private Phase phase = Phase.Intro;
+        private Phase phase = Phase.Checking;
+        private SensorCheckResult check;
+        private int checkStart;
         private FanProgress progress;
         private FanRun run;
         private FanTestResult result;
+        private PriorTest prior;
+
+        // manual test
+        private ManualFanTarget mTarget = ManualFanTarget.Both;
+        private int mPct = ManualFanJudge.DefaultPct;
+        private ManualFanProgress mProg;
+        private bool? mHeard;
+        private ManualFanResult mLast;
+        private readonly List<ManualFanAttempt> attempts = new List<ManualFanAttempt>();
+        private readonly Rectangle[] chipRect = new Rectangle[3];
+        private readonly ManualFanTarget[] chipTarget = new ManualFanTarget[3];
+        private int chipCount;
+        private Rectangle sliderRect;
+        private bool dragging;
 
         protected override WizardStep Id { get { return WizardStep.Fan; } }
         public override string Key { get { return "fan"; } }
         public override string ShortName { get { return "Ventoinhas"; } }
         public override bool CanSkip { get { return true; } }
 
+        private FanLayout Layout { get { return Sess.Pre == null ? null : Sess.Pre.Layout; } }
+
         public override void Cancel()
         {
             if (host != null) Sess.Svc.CancelFanTest();
         }
 
+        protected override void OnEnter()
+        {
+            PriorSnapshot snap = Sess.Svc.Prior;
+            prior = snap == null || Sess.Det == null ? null : PriorTests.Fan(snap.Profile, Sess.Det.Fingerprint);
+            StartCheck();
+        }
+
+        // Never silent: the step says it is checking the sensors the moment it opens, then offers the test.
+        private void StartCheck()
+        {
+            FanLayout layout = Layout;
+            if (layout == null) return;
+            phase = Phase.Checking;
+            check = null;
+            checkStart = Environment.TickCount;
+            SensorCheckResult r = null;
+            EnvSession s = Sess;
+            host.RunWorker("Sensors", delegate
+            {
+                r = s.Svc.CheckSensors(layout, null);
+            }, delegate
+            {
+                check = r ?? new SensorCheckResult();
+                if (phase == Phase.Checking) phase = check.Ok ? Phase.Ready : Phase.CheckFailed;
+            });
+        }
+
+        private bool Holding { get { return phase == Phase.ManualHold || phase == Phase.ManualStopping; } }
+
         public override StepUi Ui()
         {
             StepUi u = new StepUi();
             u.SkipVisible = true;
-            u.AVisible = phase == Phase.Intro || (phase == Phase.Done && result != null && result.Status != StepStatus.Passed);
-            u.AText = phase == Phase.Intro ? "Começar o teste das ventoinhas" : "Repetir o teste";
-            u.PrimaryEnabled = phase == Phase.Done;
+            u.SkipEnabled = !Holding;
+            if (prior != null) u.SkipText = "Pular (já testado)";
+            u.PrimaryEnabled = phase == Phase.Done || (phase == Phase.ManualAfter && mLast != null && mLast.AutoConfirmed);
+            switch (phase)
+            {
+                case Phase.CheckFailed:
+                    u.AVisible = true;
+                    u.AText = "Conferir de novo";
+                    break;
+                case Phase.Ready:
+                    u.AVisible = true;
+                    u.AText = "Começar teste";
+                    u.BVisible = true;
+                    u.BText = "Testar manualmente";
+                    break;
+                case Phase.Done:
+                    if (result != null && result.Status != StepStatus.Passed)
+                    {
+                        u.AVisible = true;
+                        u.AText = "Repetir o teste";
+                        u.BVisible = true;
+                        u.BText = "Testar manualmente";
+                    }
+                    break;
+                case Phase.ManualIdle:
+                    u.AVisible = true;
+                    u.AText = "Aplicar";
+                    u.BVisible = true;
+                    u.BText = "Voltar ao teste automático";
+                    break;
+                case Phase.ManualHold:
+                    u.AVisible = true;
+                    u.AText = "Ouvi a ventoinha mudar";
+                    u.AEnabled = mHeard == null;
+                    u.BVisible = true;
+                    u.BText = "Não mudou";
+                    u.BEnabled = mHeard == null;
+                    u.CVisible = true;
+                    u.CText = "Voltar ao automático";
+                    break;
+                case Phase.ManualStopping:
+                    u.CVisible = true;
+                    u.CText = "Voltando ao automático…";
+                    u.CEnabled = false;
+                    break;
+                case Phase.ManualAfter:
+                    u.AVisible = true;
+                    u.AText = "Testar de novo";
+                    u.BVisible = true;
+                    u.BText = "Voltar ao teste automático";
+                    break;
+            }
             return u;
         }
 
         public override void ActionA()
         {
-            FanLayout layout = Sess.Pre == null ? null : Sess.Pre.Layout;
+            switch (phase)
+            {
+                case Phase.CheckFailed: StartCheck(); break;
+                case Phase.Ready:
+                case Phase.Done: StartAuto(); break;
+                case Phase.ManualIdle: StartManual(); break;
+                case Phase.ManualHold: mHeard = true; break;
+                case Phase.ManualAfter:
+                    attempts.Clear();
+                    phase = Phase.ManualIdle;
+                    break;
+            }
+        }
+
+        public override void ActionB()
+        {
+            switch (phase)
+            {
+                case Phase.Ready:
+                case Phase.Done:
+                    phase = Phase.ManualIdle;
+                    break;
+                case Phase.ManualIdle:
+                case Phase.ManualAfter:
+                    phase = Phase.Ready;
+                    break;
+                case Phase.ManualHold:
+                    mHeard = false;
+                    StopManual();
+                    break;
+            }
+        }
+
+        public override void ActionC()
+        {
+            if (phase == Phase.ManualHold) StopManual();
+        }
+
+        private void StopManual()
+        {
+            phase = Phase.ManualStopping;
+            Sess.Svc.StopManualFan();
+        }
+
+        private void StartAuto()
+        {
+            FanLayout layout = Layout;
             if (layout == null) return;
             phase = Phase.Running;
             progress = null;
@@ -565,14 +725,108 @@ namespace Forja.App
             });
         }
 
+        // The hold is its own thread, not RunWorker: the user must be able to press the answer buttons while it runs.
+        private void StartManual()
+        {
+            FanLayout layout = Layout;
+            if (layout == null) return;
+            phase = Phase.ManualHold;
+            mProg = null;
+            mHeard = null;
+            mLast = null;
+            EnvSession s = Sess;
+            IWizardHost h = host;
+            ManualFanTarget t = mTarget;
+            int pct = mPct;
+            s.Svc.AcquireFirmware();
+            Thread th = new Thread(delegate()
+            {
+                ManualFanResult r = null;
+                try
+                {
+                    r = s.Svc.RunManualFan(t, pct, layout, delegate(ManualFanProgress p) { h.Post(delegate { mProg = p; h.Changed(); }); });
+                }
+                catch (Exception ex)
+                {
+                    Program.LogError(ex);
+                }
+                h.Post(delegate { OnManualDone(r, layout); h.Changed(); });
+            });
+            th.IsBackground = true;
+            th.Name = "SenseMonitor.EnvWizard.ManualFan";
+            th.SetApartmentState(ApartmentState.MTA);
+            th.Start();
+        }
+
+        private void OnManualDone(ManualFanResult r, FanLayout layout)
+        {
+            mLast = r ?? new ManualFanResult();
+            ManualFanAttempt a = new ManualFanAttempt();
+            a.Result = mLast;
+            a.Heard = mHeard;
+            attempts.Add(a);
+            result = ManualFanOutcome.Decide(layout, attempts);
+            Sess.Results.Fan = result;
+            phase = Phase.ManualAfter;
+            Sess.Svc.ReleaseFirmware();
+        }
+
         public override void Skip()
         {
+            PriorSnapshot snap = Sess.Svc.Prior;
+            if (prior != null && snap != null)
+            {
+                // already proved on this notebook: skipping keeps the fan control confirmed
+                PriorTests.CarryFan(Sess.Results, snap.Profile, prior, snap.MaxRpmCpu, snap.MaxRpmGpu);
+                return;
+            }
             Sess.Results.Fan.Status = StepStatus.Skipped;
+        }
+
+        public override bool Pointer(Point p, int kind)
+        {
+            if (phase != Phase.ManualIdle) return false;
+            if (kind == 0)
+            {
+                for (int i = 0; i < chipCount; i++)
+                {
+                    if (chipRect[i].Contains(p)) { mTarget = chipTarget[i]; return true; }
+                }
+                if (Rectangle.Inflate(sliderRect, 0, WizUi.S(10)).Contains(p)) { dragging = true; SetPct(p.X); return true; }
+            }
+            else if (kind == 1 && dragging) { SetPct(p.X); return true; }
+            else if (kind == 2 && dragging) { dragging = false; return true; }
+            return false;
+        }
+
+        private void SetPct(int x)
+        {
+            if (sliderRect.Width <= 0) return;
+            double f = (x - sliderRect.X) / (double)sliderRect.Width;
+            f = Math.Max(0, Math.Min(1, f));
+            mPct = ManualFanJudge.ClampPct((int)Math.Round(ManualFanJudge.MinPct + f * (ManualFanJudge.MaxPct - ManualFanJudge.MinPct)));
         }
 
         private static string RpmText(int? v)
         {
             return v.HasValue ? v.Value.ToString(CultureInfo.InvariantCulture).PadLeft(5) + " RPM" : "    — RPM";
+        }
+
+        private static string TempText(double? v)
+        {
+            return v.HasValue ? Math.Round(v.Value).ToString(CultureInfo.InvariantCulture).PadLeft(3) + " °C" : "  — °C";
+        }
+
+        private string LiveLine(FanLayout l, int? cpuRpm, int? gpuRpm)
+        {
+            return (l != null && l.Cpu ? "CPU  " + RpmText(cpuRpm) : "") + (l != null && l.Cpu && l.Gpu ? "      " : "")
+                + (l != null && l.Gpu ? "GPU  " + RpmText(gpuRpm) : "");
+        }
+
+        private string TempLine(FanLayout l, double? cpuT, double? gpuT)
+        {
+            return (l != null && l.Cpu ? "CPU  " + TempText(cpuT) : "") + (l != null && l.Cpu && l.Gpu ? "      " : "")
+                + (l != null && l.Gpu ? "GPU  " + TempText(gpuT) : "");
         }
 
         private static string FanLine(FanCheck c)
@@ -584,62 +838,202 @@ namespace Forja.App
 
         public override void Paint(Graphics g, int x, int y, int w, int limit)
         {
-            FanLayout l = Sess.Pre == null ? null : Sess.Pre.Layout;
+            FanLayout l = Layout;
             string what = l == null ? "" : (l.Count == 2 ? "Vou testar as 2 ventoinhas (CPU e GPU)." : "Vou testar a ventoinha do notebook (" + (l.Cpu ? "CPU" : "GPU") + ").");
             y += WizUi.Heading(g, x, y, w, "Ventoinhas", what);
 
-            if (phase == Phase.Intro)
+            switch (phase)
             {
-                y += WizDraw.Para(g, "As ventoinhas vão trocar de velocidade e ficar no máximo por alguns segundos. Fazer barulho é normal. Escute: você vai notar o som mudando.",
-                    Theme.Font(10.5f, false), Theme.Text, x, y, w) + WizUi.S(12);
-                List<KeyValuePair<string, string>> rows = new List<KeyValuePair<string, string>>();
-                rows.Add(WizUi.KV("1. Automático", "mede o ruído de referência"));
-                rows.Add(WizUi.KV("2. 50%", "o som deve mudar um pouco"));
-                rows.Add(WizUi.KV("3. Máximo", "o barulho deve subir bastante"));
-                rows.Add(WizUi.KV("4. Automático", "o barulho vai baixando aos poucos"));
-                y += WizUi.InfoCard(g, x, y, w, "Como vai ser (cerca de 40 segundos)", rows) + WizUi.S(12);
-                y += WizUi.Note(g, WizIcon.Warn, "Se a temperatura chegar a 90 °C ou algo falhar, as ventoinhas voltam ao automático na hora. O teste sempre termina no automático.", Palette.Warn, x, y, w);
-                if (y < limit - WizUi.S(24)) WizUi.Note(g, WizIcon.Wait, "Deixe o carregador ligado e o notebook em uma superfície firme. “Fazer depois” mantém o controle manual bloqueado.", Theme.Muted, x, y, w);
-                return;
+                case Phase.Checking: PaintChecking(g, x, y, w); return;
+                case Phase.CheckFailed: PaintCheckFailed(g, x, y, w, limit); return;
+                case Phase.Ready: PaintReady(g, x, y, w, limit); return;
+                case Phase.Running: PaintRunning(g, x, y, w, l); return;
+                case Phase.ManualIdle: PaintManualIdle(g, x, y, w, limit, l); return;
+                case Phase.ManualHold:
+                case Phase.ManualStopping: PaintManualHold(g, x, y, w, l); return;
+                default: PaintResult(g, x, y, w, limit, phase == Phase.ManualAfter); return;
             }
-            if (phase == Phase.Running)
-            {
-                if (progress == null)
-                {
-                    y += WizDraw.Para(g, "Preparando o teste…", Theme.Font(12f, true), Theme.Accent, x, y, w) + WizUi.S(10);
-                    WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), -1, host.Anim, Theme.Accent);
-                    return;
-                }
-                y += WizDraw.Para(g, progress.Text, Theme.Font(12f, true), Theme.Text, x, y, w) + WizUi.S(14);
-                WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), progress.Percent / 100.0, 0, Theme.Accent);
-                y += WizUi.S(18);
-                WizDraw.Line(g, progress.Percent.ToString(CultureInfo.InvariantCulture) + "%  ·  " + (progress.ElapsedMs / 1000).ToString(CultureInfo.InvariantCulture)
-                    + " s de " + (progress.TotalMs / 1000).ToString(CultureInfo.InvariantCulture) + " s", Theme.Font(9f, false), Theme.Muted, x, y, w);
-                y += WizUi.S(26);
-                string rpm = (l != null && l.Cpu ? "CPU  " + RpmText(progress.CpuRpm) : "") + (l != null && l.Cpu && l.Gpu ? "      " : "")
-                    + (l != null && l.Gpu ? "GPU  " + RpmText(progress.GpuRpm) : "");
-                WizDraw.Line(g, rpm, WizDraw.Mono(12f), Theme.Text, x, y, w);
-                y += WizUi.S(34);
-                WizUi.Note(g, WizIcon.Warn, "Não feche nem suspenda o computador. Se algo passar de 90 °C, volto ao automático na hora.", Palette.Warn, x, y, w);
-                return;
-            }
+        }
 
+        private void PaintChecking(Graphics g, int x, int y, int w)
+        {
+            int left = Math.Max(0, 3 - unchecked(Environment.TickCount - checkStart) / 1000);
+            y += WizDraw.Para(g, "Conferindo os sensores… (" + left.ToString(CultureInfo.InvariantCulture) + " s)", Theme.Font(12f, true), Theme.Accent, x, y, w) + WizUi.S(10);
+            WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), -1, host.Anim, Theme.Accent);
+            y += WizUi.S(22);
+            WizDraw.Para(g, "Só leitura: nada é enviado às ventoinhas agora. Confiro se as temperaturas que vigiam o teste (limite de 90 °C) estão legíveis.",
+                Theme.Font(10f, false), Theme.Muted, x, y, w);
+        }
+
+        private void PaintCheckFailed(Graphics g, int x, int y, int w, int limit)
+        {
+            y += WizUi.Note(g, WizIcon.Warn, "Não consegui confiar nos sensores agora: " + (check == null || string.IsNullOrEmpty(check.Reason) ? "sem leitura" : check.Reason)
+                + ". O teste só começa com a temperatura confirmada, porque é ela que o interrompe se esquentar demais.", Palette.Warn, x, y, w);
+            if (y < limit - WizUi.S(24))
+                WizUi.Note(g, WizIcon.Wait, "Tente de novo em alguns segundos, ou use “Fazer depois”: o controle manual continua bloqueado.", Theme.Muted, x, y, w);
+        }
+
+        private void PaintReady(Graphics g, int x, int y, int w, int limit)
+        {
+            string temps = check == null ? "" : check.Summary(Layout);
+            y += WizUi.Note(g, WizIcon.Ok, "Sensores conferidos" + (temps.Length > 0 ? ": " + temps : "") + ". Pronto para começar.", Theme.Text, x, y, w);
+            if (prior != null)
+                y += WizUi.Note(g, WizIcon.Ok, WizardText.PriorText(prior, "testado") + " “Pular (já testado)” mantém o controle das ventoinhas liberado.", Theme.Text, x, y, w);
+            y += WizDraw.Para(g, "As ventoinhas vão trocar de velocidade e ficar no máximo por alguns segundos. Fazer barulho é normal. Escute: você vai notar o som mudando. O teste só começa quando você apertar o botão.",
+                Theme.Font(10.5f, false), Theme.Text, x, y, w) + WizUi.S(12);
+            List<KeyValuePair<string, string>> rows = new List<KeyValuePair<string, string>>();
+            rows.Add(WizUi.KV("1. Automático (3 s)", "mede o ruído de referência"));
+            rows.Add(WizUi.KV("2. 50% (até 6 s)", "o som deve mudar um pouco"));
+            rows.Add(WizUi.KV("3. Máximo (até 6 s)", "o barulho deve subir bastante"));
+            rows.Add(WizUi.KV("4. Retorno (até 10 s)", "volta ao automático; o barulho vai baixando"));
+            y += WizUi.InfoCard(g, x, y, w, "Como vai ser (até 25 segundos, em geral menos)", rows) + WizUi.S(12);
+            y += WizUi.Note(g, WizIcon.Warn, "Se a temperatura chegar a 90 °C ou algo falhar, as ventoinhas voltam ao automático na hora. O teste sempre termina no automático. Cancelar também devolve ao automático.", Palette.Warn, x, y, w);
+            if (y < limit - WizUi.S(40)) WizUi.Note(g, WizIcon.Wait, "Prefere escolher a velocidade e ouvir você mesmo? Use “Testar manualmente”. “Fazer depois” mantém o controle manual bloqueado.", Theme.Muted, x, y, w);
+        }
+
+        private void PaintRunning(Graphics g, int x, int y, int w, FanLayout l)
+        {
+            if (progress == null)
+            {
+                y += WizDraw.Para(g, "Começando o teste… medindo o automático", Theme.Font(12f, true), Theme.Accent, x, y, w) + WizUi.S(10);
+                WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), -1, host.Anim, Theme.Accent);
+                return;
+            }
+            FanProgress p = progress;
+            y += WizDraw.Para(g, "Fase " + p.PhaseNumber.ToString(CultureInfo.InvariantCulture) + " de " + p.PhaseCount.ToString(CultureInfo.InvariantCulture) + " · " + p.PhaseName,
+                Theme.Font(13f, true), Theme.Text, x, y, w) + WizUi.S(4);
+            y += WizDraw.Para(g, p.Text, Theme.Font(10.5f, false), Theme.Muted, x, y, w) + WizUi.S(6);
+            y += WizDraw.Para(g, "Esta fase termina em até " + Math.Max(1, (p.PhaseLeftMs + 999) / 1000).ToString(CultureInfo.InvariantCulture) + " s (antes, se a rotação estabilizar).",
+                Theme.Font(9.5f, false), Theme.Muted, x, y, w) + WizUi.S(12);
+            WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), p.Percent / 100.0, 0, Theme.Accent);
+            y += WizUi.S(18);
+            WizDraw.Line(g, "Teste todo: " + p.Percent.ToString(CultureInfo.InvariantCulture) + "%  ·  no máximo " + (p.TotalMs / 1000).ToString(CultureInfo.InvariantCulture) + " s", Theme.Font(9f, false), Theme.Muted, x, y, w);
+            y += WizUi.S(28);
+            WizDraw.Line(g, LiveLine(l, p.CpuRpm, p.GpuRpm), WizDraw.Mono(12f), Theme.Text, x, y, w);
+            y += WizUi.S(26);
+            WizDraw.Line(g, TempLine(l, p.CpuTempC, p.GpuTempC), WizDraw.Mono(12f), Theme.Muted, x, y, w);
+            y += WizUi.S(34);
+            WizUi.Note(g, WizIcon.Warn, "Não feche nem suspenda o computador. Se algo passar de 90 °C, volto ao automático na hora. Cancelar também devolve ao automático.", Palette.Warn, x, y, w);
+        }
+
+        private void PaintManualIdle(Graphics g, int x, int y, int w, int limit, FanLayout l)
+        {
+            y += WizDraw.Para(g, "Escolha a ventoinha e a velocidade e aperte Aplicar. O app envia a velocidade pelo caminho seguro de sempre (marcador antes, limite de 90 °C) e mostra a rotação ao vivo. Escute e diga se o som mudou.",
+                Theme.Font(10.5f, false), Theme.Text, x, y, w) + WizUi.S(14);
+            // which fan
+            WizDraw.Line(g, "VENTOINHA", Theme.Font(9f, true), Theme.Muted, x, y, w);
+            y += WizUi.S(20);
+            chipCount = 0;
+            if (l != null && l.Cpu) AddChip(ManualFanTarget.Cpu);
+            if (l != null && l.Gpu) AddChip(ManualFanTarget.Gpu);
+            if (l != null && l.Count == 2) AddChip(ManualFanTarget.Both);
+            if (l != null && l.Count == 1 && mTarget == ManualFanTarget.Both) mTarget = l.Cpu ? ManualFanTarget.Cpu : ManualFanTarget.Gpu;
+            int cx = x;
+            int ch = WizUi.S(34);
+            for (int i = 0; i < chipCount; i++)
+            {
+                string text = chipTarget[i] == ManualFanTarget.Cpu ? "CPU" : chipTarget[i] == ManualFanTarget.Gpu ? "GPU" : "As duas";
+                int cw = WizUi.S(110);
+                chipRect[i] = new Rectangle(cx, y, cw, ch);
+                bool on = chipTarget[i] == mTarget;
+                if (on) Theme.FillRound(g, Theme.Accent, chipRect[i], WizUi.S(6));
+                else { Theme.FillRound(g, Theme.Panel, chipRect[i], WizUi.S(6)); Theme.DrawRound(g, Palette.Line2, chipRect[i], WizUi.S(6)); }
+                Theme.Draw(g, text, Theme.Font(10f, true), on ? Theme.OnAccent : Theme.Text, chipRect[i],
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                cx += cw + WizUi.S(10);
+            }
+            y += ch + WizUi.S(18);
+            // speed
+            WizDraw.Line(g, "VELOCIDADE", Theme.Font(9f, true), Theme.Muted, x, y, w / 2);
+            Theme.Draw(g, mPct.ToString(CultureInfo.InvariantCulture) + "%", Theme.Font(13f, true), Theme.Text,
+                new Rectangle(x + w / 2, y - WizUi.S(4), w / 2, WizUi.S(26)), TextFormatFlags.Right | TextFormatFlags.SingleLine);
+            y += WizUi.S(26);
+            int th = WizUi.S(8);
+            sliderRect = new Rectangle(x + WizUi.S(8), y + WizUi.S(8), w - WizUi.S(16), th);
+            Theme.FillRound(g, Theme.Track, sliderRect, th / 2);
+            double f = (mPct - ManualFanJudge.MinPct) / (double)(ManualFanJudge.MaxPct - ManualFanJudge.MinPct);
+            int fillW = Math.Max(th, (int)Math.Round(sliderRect.Width * f));
+            Theme.FillRound(g, Theme.Accent, new Rectangle(sliderRect.X, sliderRect.Y, fillW, th), th / 2);
+            int kd = WizUi.S(20);
+            Rectangle knob = new Rectangle(sliderRect.X + (int)Math.Round(sliderRect.Width * f) - kd / 2, sliderRect.Y + th / 2 - kd / 2, kd, kd);
+            Theme.FillRound(g, Theme.Text, knob, kd / 2);
+            y += WizUi.S(30);
+            WizDraw.Line(g, "30%", Theme.Font(9f, false), Theme.Muted, x, y, WizUi.S(60));
+            Theme.Draw(g, "100%", Theme.Font(9f, false), Theme.Muted, new Rectangle(x + w - WizUi.S(60), y, WizUi.S(60), WizUi.S(18)), TextFormatFlags.Right | TextFormatFlags.SingleLine);
+            y += WizUi.S(26);
+            y += WizUi.Note(g, WizIcon.Wait, "Para o teste valer, use uma velocidade bem diferente da do automático (a partir de 60%). Qualquer coisa que falhe ou chegue a 90 °C devolve ao automático na hora.", Theme.Muted, x, y, w);
+            if (y < limit - WizUi.S(24)) WizUi.Note(g, WizIcon.Warn, "Para terminar este passo, as ventoinhas precisam voltar ao automático, confirmado pelo firmware.", Palette.Warn, x, y, w);
+        }
+
+        private void AddChip(ManualFanTarget t)
+        {
+            chipTarget[chipCount] = t;
+            chipRect[chipCount] = Rectangle.Empty;
+            chipCount++;
+        }
+
+        private void PaintManualHold(Graphics g, int x, int y, int w, FanLayout l)
+        {
+            string fan = mTarget == ManualFanTarget.Cpu ? "Ventoinha CPU" : mTarget == ManualFanTarget.Gpu ? "Ventoinha GPU" : "As duas ventoinhas";
+            if (phase == Phase.ManualStopping)
+            {
+                y += WizDraw.Para(g, "Voltando ao automático…", Theme.Font(13f, true), Theme.Accent, x, y, w) + WizUi.S(10);
+                WizDraw.Bar(g, new Rectangle(x, y, w, WizUi.S(10)), -1, host.Anim, Theme.Accent);
+                y += WizUi.S(22);
+                WizDraw.Para(g, "Escrevo o automático e confiro a leitura de volta no firmware.", Theme.Font(10f, false), Theme.Muted, x, y, w);
+                return;
+            }
+            y += WizDraw.Para(g, fan + " a " + mPct.ToString(CultureInfo.InvariantCulture) + "%", Theme.Font(13f, true), Theme.Text, x, y, w) + WizUi.S(6);
+            bool settled = mProg != null && mProg.Settled;
+            string hint = mProg == null ? "Aplicando e medindo…"
+                : settled ? "A rotação estabilizou. Escute: o som mudou em relação ao automático?"
+                : "A rotação ainda está mudando… espere alguns segundos e escute.";
+            y += WizDraw.Para(g, hint, Theme.Font(10.5f, false), settled ? Palette.Ok : Theme.Muted, x, y, w) + WizUi.S(14);
+            ManualFanProgress p = mProg ?? new ManualFanProgress();
+            WizDraw.Line(g, LiveLine(l, p.CpuRpm, p.GpuRpm), WizDraw.Mono(12f), Theme.Text, x, y, w);
+            y += WizUi.S(26);
+            WizDraw.Line(g, TempLine(l, p.CpuTempC, p.GpuTempC), WizDraw.Mono(12f), Theme.Muted, x, y, w);
+            y += WizUi.S(30);
+            int left = Math.Max(0, (p.LimitMs - p.HeldMs) / 1000);
+            if (mProg != null)
+                y += WizDraw.Para(g, "Volto sozinho ao automático em " + left.ToString(CultureInfo.InvariantCulture) + " s se você não responder.", Theme.Font(9.5f, false), Theme.Muted, x, y, w) + WizUi.S(10);
+            if (mHeard == true)
+                y += WizUi.Note(g, WizIcon.Ok, "Anotado: você ouviu a mudança. Agora use “Voltar ao automático”.", Theme.Text, x, y, w);
+            WizUi.Note(g, WizIcon.Warn, "Se passar de 90 °C, volto ao automático na hora. Cancelar também devolve ao automático.", Palette.Warn, x, y, w);
+        }
+
+        private void PaintResult(Graphics g, int x, int y, int w, int limit, bool manual)
+        {
             FanTestResult r = result ?? new FanTestResult();
+            string how = manual ? "manual" : "automático";
             if (r.Status == StepStatus.Passed)
-                y += WizUi.Note(g, WizIcon.Ok, "As ventoinhas seguiram os comandos. O controle manual será liberado quando você concluir.", Theme.Text, x, y, w);
+                y += WizUi.Note(g, WizIcon.Ok, "As ventoinhas seguiram os comandos (teste " + how + "). O controle manual será liberado quando você concluir.", Theme.Text, x, y, w);
             else if (r.Status == StepStatus.Failed)
                 y += WizUi.Note(g, WizIcon.Fail, "O teste das ventoinhas falhou: " + (r.Reason ?? "sem detalhes") + ". O controle manual continua bloqueado.", Palette.Hot, x, y, w);
             else
                 y += WizUi.Note(g, WizIcon.Warn, "O teste não terminou: " + (r.Reason ?? "sem detalhes") + ". O controle manual continua bloqueado.", Palette.Warn, x, y, w);
             y += WizUi.S(6);
-            if (run != null && run.Report != null)
+            List<KeyValuePair<string, string>> rows = new List<KeyValuePair<string, string>>();
+            if (manual && mLast != null)
             {
-                List<KeyValuePair<string, string>> rows = new List<KeyValuePair<string, string>>();
+                if (mLast.Cpu != null) rows.Add(WizUi.KV("CPU", ManualLine(mLast.Cpu, mLast.Pct)));
+                if (mLast.Gpu != null) rows.Add(WizUi.KV("GPU", ManualLine(mLast.Gpu, mLast.Pct)));
+                rows.Add(WizUi.KV("Automático", mLast.AutoConfirmed ? "de volta ao automático, confirmado" : "NÃO confirmado: use Cancelar para tentar devolver"));
+            }
+            else if (run != null && run.Report != null)
+            {
                 if (run.Report.Cpu != null) rows.Add(WizUi.KV("CPU", FanLine(run.Report.Cpu)));
                 if (run.Report.Gpu != null) rows.Add(WizUi.KV("GPU", FanLine(run.Report.Gpu)));
-                if (rows.Count > 0 && y < limit - WizUi.S(80)) y += WizUi.InfoCard(g, x, y, w, "Rotação medida", rows) + WizUi.S(10);
             }
+            if (rows.Count > 0 && y < limit - WizUi.S(80)) y += WizUi.InfoCard(g, x, y, w, "Rotação medida", rows) + WizUi.S(10);
             if (y < limit - WizUi.S(24)) WizUi.Note(g, WizIcon.Ok, "As ventoinhas ficam no automático ao fim do teste.", Theme.Muted, x, y, w);
+        }
+
+        private static string ManualLine(ManualFanVerdict v, int pct)
+        {
+            if (v.Baseline <= 0) return v.Reason ?? "sem leitura";
+            string s = "automático " + v.Baseline.ToString(CultureInfo.InvariantCulture) + " · " + pct.ToString(CultureInfo.InvariantCulture) + "% " + v.Settled.ToString(CultureInfo.InvariantCulture) + " RPM";
+            return v.Moved ? s + " — a rotação mudou" : s + " — " + (v.Reason ?? "não mudou");
         }
     }
 
@@ -652,6 +1046,7 @@ namespace Forja.App
         private Phase phase = Phase.Intro;
         private ModeTestProgress progress;
         private ModeTestOutcome outcome;
+        private readonly Dictionary<PerfMode, PriorTest> priors = new Dictionary<PerfMode, PriorTest>();
 
         protected override WizardStep Id { get { return WizardStep.Mode; } }
         public override string Key { get { return "mode"; } }
@@ -663,10 +1058,40 @@ namespace Forja.App
             if (host != null) Sess.Svc.CancelModeTest();
         }
 
+        // Modes of this plan (the candidates and Dia a dia) that an earlier run already confirmed on this notebook.
+        protected override void OnEnter()
+        {
+            priors.Clear();
+            PriorSnapshot snap = Sess.Svc.Prior;
+            if (snap == null || Sess.Det == null) return;
+            List<PerfMode> all = new List<PerfMode>(Sess.ModeCandidates);
+            if (!all.Contains(PerfMode.DiaADia)) all.Add(PerfMode.DiaADia);
+            foreach (PerfMode m in all)
+            {
+                PriorTest t = PriorTests.Mode(snap.Profile, Sess.Det.Fingerprint, m);
+                if (t != null) priors[m] = t;
+            }
+        }
+
+        // Every mode this test would try was already confirmed here: nothing is left to prove.
+        private bool AllPrior
+        {
+            get
+            {
+                if (priors.Count == 0 || !priors.ContainsKey(PerfMode.DiaADia)) return false;
+                foreach (PerfMode m in Sess.ModeCandidates)
+                {
+                    if (!priors.ContainsKey(m)) return false;
+                }
+                return true;
+            }
+        }
+
         public override StepUi Ui()
         {
             StepUi u = new StepUi();
             u.SkipVisible = true;
+            if (AllPrior) u.SkipText = "Pular (já testados)";
             u.AVisible = phase == Phase.Intro;
             u.AText = "Começar o teste dos modos";
             u.PrimaryEnabled = phase == Phase.Done;
@@ -708,8 +1133,15 @@ namespace Forja.App
 
         public override void Skip()
         {
-            foreach (PerfMode m in Sess.ModeCandidates) Sess.Results.SetMode(m, StepStatus.Skipped, false);
-            Sess.Results.SetMode(PerfMode.DiaADia, StepStatus.Skipped, false);
+            // what an earlier run confirmed on this notebook stays confirmed; the rest waits for a later test
+            List<PerfMode> all = new List<PerfMode>(Sess.ModeCandidates);
+            if (!all.Contains(PerfMode.DiaADia)) all.Add(PerfMode.DiaADia);
+            foreach (PerfMode m in all)
+            {
+                PriorTest t;
+                if (priors.TryGetValue(m, out t)) PriorTests.CarryMode(Sess.Results, m, t);
+                else Sess.Results.SetMode(m, StepStatus.Skipped, false);
+            }
         }
 
         public override void Paint(Graphics g, int x, int y, int w, int limit)
@@ -722,6 +1154,14 @@ namespace Forja.App
                 PerfMode? now = Sess.Raw.ProfileCode.HasValue ? ModeCatalog.FromCode(Sess.Raw.ProfileCode.Value) : null;
                 List<string> names = new List<string>();
                 foreach (PerfMode m in ModeTestPlan.Order(now, Sess.ModeCandidates)) names.Add(ModeCatalog.Name(m));
+                if (priors.Count > 0)
+                {
+                    List<string> done = new List<string>();
+                    string when = null;
+                    foreach (KeyValuePair<PerfMode, PriorTest> kv in priors) { done.Add(ModeCatalog.Name(kv.Key)); if (when == null) when = kv.Value.DateText; }
+                    y += WizUi.Note(g, WizIcon.Ok, "Já testados neste notebook em " + when + ": " + string.Join(", ", done.ToArray()) + "."
+                        + (AllPrior ? " “Pular (já testados)” mantém todos liberados." : ""), Theme.Text, x, y, w);
+                }
                 y += WizDraw.Para(g, "Ordem do teste: " + string.Join(" → ", names.ToArray()) + ". Cada troca é lida de volta no firmware. Termino sempre no Dia a dia.",
                     Theme.Font(10.5f, false), Theme.Text, x, y, w) + WizUi.S(12);
                 y += WizUi.Note(g, WizIcon.Wait, "Cada troca leva alguns segundos. Escute: o ruído das ventoinhas pode mudar.", Theme.Muted, x, y, w);

@@ -78,7 +78,8 @@ namespace Forja.Tests
             List<string> fan = new List<string>();
             foreach (string c in rig.Fw.Calls) if (!c.StartsWith("mode")) fan.Add(c);
             Assert.Equal("auto|pct:50,50|max|auto", string.Join("|", fan.ToArray()));
-            Assert.True(rig.SleptMs >= 3 * FanValidationRunner.PhaseMs, "each phase waits ~8 s: " + rig.SleptMs);
+            Assert.True(rig.SleptMs <= FanValidationRunner.TotalMs, "never longer than the worst case: " + rig.SleptMs);
+            Assert.True(rig.SleptMs >= 4 * FanValidationRunner.SampleMs, "at least a few readings per phase: " + rig.SleptMs);
 
             Config cfg = new Config();
             rep.ApplyTo(cfg, new DateTime(2026, 11, 17, 10, 0, 0, DateTimeKind.Utc));

@@ -33,6 +33,7 @@ namespace Forja.ReleaseTool
                 if (args.Length == 0) return Usage();
                 string cmd = args[0].ToLowerInvariant();
                 if (cmd == "gerar-chave" && args.Length == 1) return GenerateKey();
+                if (cmd == "exportar-sem-senha" && args.Length == 1) return ExportPlain();
                 if (cmd == "assinar" && args.Length == 2) return Sign(args[1]);
                 if (cmd == "manifesto" && args.Length == 5) return Manifest(args[1], args[2], args[3], args[4]);
                 if (cmd == "verificar" && args.Length == 3) return Verify(args[1], args[2]);
@@ -174,8 +175,54 @@ namespace Forja.ReleaseTool
 
         // ---- assinar -------------------------------------------------------------------------
 
+        // Owner's choice (2026-11-17): releases may use a plain key file without passphrase, so
+        // signing needs no one at the console. Same user-only ACL rule; anyone running as this
+        // user can read it, which the owner accepted.
+        private const string PlainKeyName = "chave-privada.key";
+
+        private static string PlainKeyPath
+        {
+            get { return Path.Combine(KeyDir, PlainKeyName); }
+        }
+
+        private static int ExportPlain()
+        {
+            string enc = KeyPath, plain = PlainKeyPath;
+            if (File.Exists(plain)) { Console.Error.WriteLine("RECUSADO: " + plain + " já existe."); return 1; }
+            if (!File.Exists(enc)) { Console.Error.WriteLine("chave criptografada não encontrada em " + enc); return 1; }
+            string acl = KeyFileProblem(enc);
+            if (acl != null) { Console.Error.WriteLine("RECUSADO: " + acl); return 1; }
+            string pass = ReadSecret("Frase-senha da chave (última vez): ");
+            string err;
+            string xml = KeyVault.Unprotect(File.ReadAllBytes(enc), pass, out err);
+            if (xml == null) { Console.Error.WriteLine(err); return 1; }
+            SecurityIdentifier me = WindowsIdentity.GetCurrent().User;
+            FileSecurity fs = new FileSecurity();
+            fs.SetOwner(me);
+            fs.SetAccessRuleProtection(true, false);
+            fs.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.FullControl, AccessControlType.Allow));
+            using (FileStream f = new FileStream(plain, FileMode.CreateNew, FileSystemRights.WriteData, FileShare.None, 4096, FileOptions.None, fs))
+            {
+                byte[] b = new UTF8Encoding(false).GetBytes(xml);
+                f.Write(b, 0, b.Length);
+            }
+            Console.WriteLine("chave sem senha criada (só o seu usuário lê): " + plain);
+            Console.WriteLine("Daqui em diante assinar não pede frase-senha. Faça backup e NUNCA envie esse arquivo ao GitHub.");
+            return 0;
+        }
+
         private static string ReadPrivateKey()
         {
+            string plainPath = PlainKeyPath;
+            if (File.Exists(plainPath))
+            {
+                string pacl = KeyFileProblem(plainPath);
+                if (pacl != null) throw new InvalidOperationException("RECUSADO: " + pacl + ". Corrija as permissões (só o seu usuário) antes de assinar.");
+                string pxml = File.ReadAllText(plainPath, Encoding.UTF8);
+                if (pxml.IndexOf("<RSAKeyValue>", StringComparison.Ordinal) < 0 || pxml.IndexOf("<" + "D>", StringComparison.Ordinal) < 0) // split: publicar.ps1 scans for that marker
+                    throw new InvalidOperationException("o arquivo " + plainPath + " não contém uma chave privada RSA");
+                return pxml;
+            }
             string path = KeyPath;
             if (!File.Exists(path)) throw new InvalidOperationException("chave privada não encontrada em " + path + " (rode gerar-chave)");
             string acl = KeyFileProblem(path);

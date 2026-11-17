@@ -11,6 +11,7 @@ namespace Forja.Core
         public static FanTestResult Fan(FanValidationReport rep)
         {
             FanTestResult r = new FanTestResult();
+            r.Method = "automático";
             if (rep == null)
             {
                 r.Status = StepStatus.Skipped;
@@ -54,6 +55,8 @@ namespace Forja.Core
             foreach (ModeStepResult s in o.Steps)
             {
                 into.SetMode(s.Mode, s.Status, s.Proven);
+                ModeStepResult r = into.ModeResult(s.Mode);
+                if (r != null) r.Method = "automático";
             }
         }
 

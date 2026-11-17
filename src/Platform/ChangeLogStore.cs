@@ -30,8 +30,7 @@ namespace Forja.Platform
         {
             get
             {
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "SenseMonitor", "historico.json");
+                return Path.Combine(UserData.Roaming, "historico.json");
             }
         }
 

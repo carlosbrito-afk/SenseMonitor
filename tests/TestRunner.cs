@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
+using Forja.Core;
 
 namespace Forja.Tests
 {
@@ -67,10 +69,19 @@ namespace Forja.Tests
 
     public static class TestRunner
     {
+        // The throw-away folder every user-data path of the suite lives in (set by Main).
+        public static string Sandbox;
+
         public static int Main(string[] args)
         {
             int passed = 0;
             List<string> failures = new List<string>();
+            // Every file the code under test would write (journal, config, markers, state) goes to a throw-away folder:
+            // a test must never touch the user's real %APPDATA%\SenseMonitor (see SandboxTests).
+            string sandbox = Path.Combine(Path.GetTempPath(), "forja-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(sandbox);
+            UserData.Override = sandbox;
+            Sandbox = sandbox;
             Type[] types;
             try
             {
@@ -94,15 +105,22 @@ namespace Forja.Tests
                         continue;
                     }
                     string name = type.Name + "." + method.Name;
+                    // optional filter: ForjaTests.exe Fan  runs only the tests whose name contains "Fan"
+                    if (args != null && args.Length > 0 && name.IndexOf(args[0], StringComparison.OrdinalIgnoreCase) < 0) continue;
                     if (method.GetParameters().Length != 0 || method.ReturnType != typeof(void))
                     {
                         failures.Add(name);
                         Console.WriteLine("FAIL " + name + ": invalid test signature (must be public static void with no parameters)");
                         continue;
                     }
+                    int before = UserData.ViolationCount;
                     try
                     {
                         method.Invoke(null, null);
+                        if (UserData.ViolationCount > before)
+                        {
+                            throw new AssertionException(UserData.Violations[before]);
+                        }
                         passed++;
                         Console.WriteLine("PASS " + name);
                     }
@@ -126,6 +144,9 @@ namespace Forja.Tests
                     }
                 }
             }
+            UserData.Override = null;
+            try { Directory.Delete(sandbox, true); }
+            catch (Exception) { }
             Console.WriteLine(passed + " passed, " + failures.Count + " failed");
             return Math.Min(failures.Count, 255);
         }
