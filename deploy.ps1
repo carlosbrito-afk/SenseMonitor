@@ -53,6 +53,17 @@ function Invoke-Native([string]$exe, [string[]]$argList) {
     return $code
 }
 
+# Signals the running app's exit event (Administrators/SYSTEM only may open it; this script runs elevated).
+# $true = the event was there and is set; $false = no event (no app, an older app) or no access.
+function Send-ExitEvent {
+    try {
+        $ev = [System.Threading.EventWaitHandle]::OpenExisting('Global\SenseMonitor.Sair', [System.Security.AccessControl.EventWaitHandleRights]::Modify)
+        try { return [bool]$ev.Set() } finally { $ev.Close() }
+    } catch {
+        return $false
+    }
+}
+
 function Log-Native([int]$maxLines) {
     $lines = $script:nativeOut
     if ($maxLines -gt 0 -and $lines.Count -gt $maxLines) { $lines = $lines | Select-Object -Last $maxLines }
@@ -85,15 +96,29 @@ try {
     }
     if (-not (Test-Path (Join-Path $Repo 'build.cmd'))) { Fail ('build.cmd nao encontrado em ' + $Repo) }
 
-    # 1. graceful close (taskkill WITHOUT /F posts WM_CLOSE: the app hands the fans back and exits)
+    # 1. graceful close: the app's named exit event first (the same one `SenseMonitor.exe --sair` signals), then, only if the app
+    #    is still there after 10 s (or the event does not exist: an older app), taskkill WITHOUT /F, which posts WM_CLOSE.
+    #    Either way the app hands the fans back and exits. The event is signalled from here and not through the installed exe's
+    #    --sair, because the installed exe may predate that switch (an older exe would show an "invalid arguments" box).
     $running = @(Get-Process -Name 'SenseMonitor' -ErrorAction SilentlyContinue)
-    foreach ($p in $running) {
-        Log ('fechando o app (pid ' + $p.Id + ', sem /F)')
-        [void](Invoke-Native $taskkill @('/PID', [string]$p.Id))
-        Log-Native 0
-    }
     $t0 = Get-Date
+    $signalled = $false
+    if ($running.Count -gt 0) {
+        $signalled = Send-ExitEvent
+        Log ('pedido de saida pelo evento Global\SenseMonitor.Sair: ' + $(if ($signalled) { 'enviado' } else { 'sem evento (app antigo ou sem acesso)' }))
+    }
+    $closeAt = 10
+    if (-not $signalled) { $closeAt = 0 }
+    $asked = ($running.Count -eq 0)
     while ((Get-Process -Name 'SenseMonitor' -ErrorAction SilentlyContinue) -and ((Get-Date) - $t0).TotalSeconds -lt 30) {
+        if (-not $asked -and ((Get-Date) - $t0).TotalSeconds -ge $closeAt) {
+            $asked = $true
+            foreach ($p in @(Get-Process -Name 'SenseMonitor' -ErrorAction SilentlyContinue)) {
+                Log ('fechando o app (pid ' + $p.Id + ', sem /F)')
+                [void](Invoke-Native $taskkill @('/PID', [string]$p.Id))
+                Log-Native 0
+            }
+        }
         Start-Sleep -Milliseconds 250
     }
     if (Get-Process -Name 'SenseMonitor' -ErrorAction SilentlyContinue) {

@@ -998,7 +998,7 @@ namespace Forja.App
             if (mProg != null)
                 y += WizDraw.Para(g, "Volto sozinho ao automático em " + left.ToString(CultureInfo.InvariantCulture) + " s se você não responder.", Theme.Font(9.5f, false), Theme.Muted, x, y, w) + WizUi.S(10);
             if (mHeard == true)
-                y += WizUi.Note(g, WizIcon.Ok, "Anotado: você ouviu a mudança. Agora use “Voltar ao automático”.", Theme.Text, x, y, w);
+                y += WizUi.Note(g, WizIcon.Ok, "Anotado: você ouviu a mudança, e a sua palavra vale mesmo que a medição de rotação não acompanhe. Agora use “Voltar ao automático”.", Theme.Text, x, y, w);
             WizUi.Note(g, WizIcon.Warn, "Se passar de 90 °C, volto ao automático na hora. Cancelar também devolve ao automático.", Palette.Warn, x, y, w);
         }
 
@@ -1006,18 +1006,23 @@ namespace Forja.App
         {
             FanTestResult r = result ?? new FanTestResult();
             string how = manual ? "manual" : "automático";
-            if (r.Status == StepStatus.Passed)
+            if (r.Status == StepStatus.Passed && ManualFanOutcome.IsUserConfirmed(r.Method))
+                y += WizUi.Note(g, WizIcon.Ok, "Você ouviu as ventoinhas mudarem, e isso vale: a medição de rotação não mostrou a mudança por completo, mas a sua confirmação libera o controle manual quando você concluir. Os números medidos ficam registrados.", Theme.Text, x, y, w);
+            else if (r.Status == StepStatus.Passed)
                 y += WizUi.Note(g, WizIcon.Ok, "As ventoinhas seguiram os comandos (teste " + how + "). O controle manual será liberado quando você concluir.", Theme.Text, x, y, w);
             else if (r.Status == StepStatus.Failed)
                 y += WizUi.Note(g, WizIcon.Fail, "O teste das ventoinhas falhou: " + (r.Reason ?? "sem detalhes") + ". O controle manual continua bloqueado.", Palette.Hot, x, y, w);
             else
                 y += WizUi.Note(g, WizIcon.Warn, "O teste não terminou: " + (r.Reason ?? "sem detalhes") + ". O controle manual continua bloqueado.", Palette.Warn, x, y, w);
+            // The program may not detect a change that a person hears: the automatic result always offers the manual test, in words.
+            if (!manual && r.Status != StepStatus.Passed)
+                y += WizUi.Note(g, WizIcon.Wait, "Às vezes o programa não detecta a mudança, mas você ouve. Se for o caso, use “Testar manualmente”: escolha a velocidade, escute e diga o que ouviu. A sua resposta vale.", Theme.Text, x, y, w);
             y += WizUi.S(6);
             List<KeyValuePair<string, string>> rows = new List<KeyValuePair<string, string>>();
             if (manual && mLast != null)
             {
-                if (mLast.Cpu != null) rows.Add(WizUi.KV("CPU", ManualLine(mLast.Cpu, mLast.Pct)));
-                if (mLast.Gpu != null) rows.Add(WizUi.KV("GPU", ManualLine(mLast.Gpu, mLast.Pct)));
+                if (mLast.Cpu != null) rows.Add(WizUi.KV("CPU", ManualLine(mLast.Cpu, mLast.Pct, mHeard == true)));
+                if (mLast.Gpu != null) rows.Add(WizUi.KV("GPU", ManualLine(mLast.Gpu, mLast.Pct, mHeard == true)));
                 rows.Add(WizUi.KV("Automático", mLast.AutoConfirmed ? "de volta ao automático, confirmado" : "NÃO confirmado: use Cancelar para tentar devolver"));
             }
             else if (run != null && run.Report != null)
@@ -1029,11 +1034,12 @@ namespace Forja.App
             if (y < limit - WizUi.S(24)) WizUi.Note(g, WizIcon.Ok, "As ventoinhas ficam no automático ao fim do teste.", Theme.Muted, x, y, w);
         }
 
-        private static string ManualLine(ManualFanVerdict v, int pct)
+        private static string ManualLine(ManualFanVerdict v, int pct, bool heard)
         {
-            if (v.Baseline <= 0) return v.Reason ?? "sem leitura";
+            if (v.Baseline <= 0) return heard ? "você ouviu a mudança (" + (v.Reason ?? "sem leitura") + ")" : (v.Reason ?? "sem leitura");
             string s = "automático " + v.Baseline.ToString(CultureInfo.InvariantCulture) + " · " + pct.ToString(CultureInfo.InvariantCulture) + "% " + v.Settled.ToString(CultureInfo.InvariantCulture) + " RPM";
-            return v.Moved ? s + " — a rotação mudou" : s + " — " + (v.Reason ?? "não mudou");
+            if (v.Moved) return s + " — a rotação mudou";
+            return heard ? s + " — você ouviu a mudança; a medição não mostrou (vale a sua palavra)" : s + " — " + (v.Reason ?? "não mudou");
         }
     }
 

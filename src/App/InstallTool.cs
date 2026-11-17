@@ -155,7 +155,7 @@ namespace Forja.App
                 UpdateVersion there = UpdateHelper.InstalledVersion();
                 if (InstallPlanner.NeedsDowngradeConfirmation(there, mine))
                 {
-                    DialogResult d = MessageBox.Show("A versão instalada (" + there + ") é mais nova que esta (" + AppVersion.Text + ").\n\nSubstituir mesmo assim?",
+                    DialogResult d = MessageBox.Show("A versão instalada (" + there + ") é mais nova que este arquivo (" + AppVersion.Text + ").\n\nInstalar a versão antiga mesmo assim?",
                         Caption, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                     if (d != DialogResult.Yes) return 1;
                 }

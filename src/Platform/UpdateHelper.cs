@@ -287,14 +287,11 @@ namespace Forja.Platform
                 }
             }
 
-            // No /F: WM_CLOSE only, so the app exits through its normal path and hands the fans back.
+            // The exit event first; no /F ever: after the grace the window close (WM_CLOSE) follows, so the app exits through its
+            // normal path and hands the fans back. WaitInstalledAppExit then gives it the rest of the time.
             public void RequestCloseInstalledApp()
             {
-                foreach (int id in ProcessScan.AppIds(ownPid))
-                {
-                    int code;
-                    ToolRunner.Run(InstallPaths.System32("taskkill.exe"), "/PID " + id, 15000, out code);
-                }
+                GracefulClose.Run(new RealCloseEnv(ownPid, false), ExitSignal.SignalGraceMs + 2000);
             }
 
             public bool WaitInstalledAppExit(int timeoutMs)

@@ -10,8 +10,9 @@ using Microsoft.Win32;
 namespace Forja.Platform
 {
     // The running copies of the installed app (told apart by command line, never by image path alone)
-    // and the orderly way to stop them: taskkill WITHOUT /F posts WM_CLOSE, the app exits through its
-    // normal path and hands the fans back to the firmware. A copy that does not close is never forced.
+    // and the orderly way to stop them: the app's named exit event first (ExitSignal), then taskkill WITHOUT /F, which
+    // posts WM_CLOSE; either way the app exits through its normal path and hands the fans back to the firmware. A copy
+    // that does not close is never forced.
     // The fan sentinel is not "the app": it is never asked to close (it leaves on its own a few seconds
     // after the last app exits with the fans on Auto); callers that delete files wait for it separately.
     public static class AppProcesses
@@ -45,8 +46,8 @@ namespace Forja.Platform
         // false = a copy is still running after the wait (and was not forced).
         public static bool CloseGracefully(int excludePid, int waitMs, bool alsoWaitForSentinel)
         {
-            if (ProcessScan.AppIds(excludePid).Count > 0) RequestClose(excludePid);
-            return WaitGone(excludePid, waitMs, alsoWaitForSentinel);
+            // The exit event first, the window close only if the app is still there after the grace (see GracefulClose).
+            return GracefulClose.Run(new RealCloseEnv(excludePid, alsoWaitForSentinel), waitMs);
         }
     }
 

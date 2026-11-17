@@ -87,6 +87,15 @@ namespace Forja.App
                 return;
             }
 
+            // --sair: asks the running app to leave through its named exit event, then ends. No window, no elevation question
+            // (the event's own access list decides who may signal: Administrators and SYSTEM). Exit code 0 = signalled, 1 = the
+            // event was not there or not reachable (no app running, an older app, or not an administrator).
+            if (StartupRouter.IsExitRequest(Environment.GetCommandLineArgs()))
+            {
+                Environment.ExitCode = ExitEvent.Signal() ? 0 : 1;
+                return;
+            }
+
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { Crash(e.Exception, true); };
             AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Crash(e.ExceptionObject as Exception, false); };

@@ -12,6 +12,6 @@ namespace Forja.App
 {
     public static class AppVersion
     {
-        public const string Text = "0.2.2";
+        public const string Text = "0.2.3";
     }
 }

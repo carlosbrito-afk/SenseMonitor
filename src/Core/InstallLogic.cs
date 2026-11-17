@@ -61,6 +61,15 @@ namespace Forja.Core
         public const string StageDetectToken = "reconhecer";
         public const string StageDetectSwitch = StagePrefix + StageDetectToken;
         public const string ShaPrefix = "--sha=";
+        // SenseMonitor.exe --sair: signals the running app's exit event and ends (no window, no elevation question; the
+        // event's own access list decides who may). Exactly this one argument, handled before everything else in Main.
+        public const string ExitSwitch = "--sair";
+
+        // args = Environment.GetCommandLineArgs(): the exe and exactly "--sair".
+        public static bool IsExitRequest(string[] args)
+        {
+            return args != null && args.Length == 2 && Is(args[1], ExitSwitch);
+        }
 
         // "--sha=<64 hex>" for a hash, or null when it is not one.
         public static string ShaSwitch(string sha256Hex)

@@ -251,16 +251,182 @@ namespace Forja.Tests
             Assert.True(r.Reason.Contains("não mudou"), r.Reason);
         }
 
+        // The user's word wins: "Ouvi a ventoinha mudar" unlocks the fan control even when the measured RPM change is small.
         [Test]
-        public static void Decide_HeardButTheRpmDidNotMove_Fails()
+        public static void Decide_HeardButTheRpmDidNotMove_UserWordWins_PassesAsUserConfirmed()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.PctRpm = delegate(int pct) { return rig.AutoRpm + 100; }; // 3.7 %: below the 10 % the measurement asks for
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            Assert.True(!l[0].Result.Cpu.Moved && !l[0].Result.Cpu.Inconclusive, "the measurement alone would say no");
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal(StepStatus.Passed, r.Status);
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, r.Method);
+            Assert.Equal("manual (confirmado pelo usuário, sem medição)", r.Method);
+            Assert.True(r.CpuOk && r.GpuOk, "both fans");
+            Assert.Equal(0, r.MaxRpmCpu);
+            Assert.Equal(0, r.MaxRpmGpu);
+            // the measured numbers are kept, not thrown away
+            Assert.True(r.Reason != null && r.Reason.Contains("2700") && r.Reason.Contains("2800"), r.Reason);
+        }
+
+        [Test]
+        public static void Decide_HeardAndTheRpmIsUnreadable_UserWordWins()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            Func<SensorReading> good = rig.Fw.ReadingSource;
+            rig.Fw.ReadingSource = delegate
+            {
+                SensorReading r0 = good();
+                r0.CpuFanRpm = null;
+                r0.GpuFanRpm = null;
+                return r0;
+            };
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal(StepStatus.Passed, r.Status);
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, r.Method);
+            Assert.True(r.Reason.Contains("sem leitura"), r.Reason);
+            Assert.Equal(0, r.MaxRpmCpu);
+        }
+
+        [Test]
+        public static void Decide_HeardNearAutomatico_InconclusiveMeasurement_UserWordWins()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.AutoRpm = 4500;
+            rig.PctRpm = delegate(int pct) { return 4500; };
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 70, true));
+            Assert.True(l[0].Result.Cpu.Inconclusive, "the measurement could not conclude");
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal(StepStatus.Passed, r.Status);
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, r.Method);
+        }
+
+        [Test]
+        public static void Decide_HeardAndMeasuredMoved_KeepsThePlainManualMethodAndTheReference()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal("manual", r.Method);
+            Assert.True(r.MaxRpmCpu > 0 && r.MaxRpmGpu > 0, "measured: the RPM guard keeps its reference");
+        }
+
+        [Test]
+        public static void Decide_OneFanMeasuredOneByTheUsersWord_IsUserConfirmedButKeepsTheMeasuredReference()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Cpu, 80, true));
+            Rig rig2 = new Rig(FanLayout.Both);
+            rig2.PctRpm = delegate(int pct) { return rig2.AutoRpm; };
+            l.Add(Attempt(rig2, ManualFanTarget.Gpu, 80, true));
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal(StepStatus.Passed, r.Status);
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, r.Method);
+            Assert.True(r.MaxRpmCpu > 0, "the fan that was measured keeps its reference");
+            Assert.Equal(0, r.MaxRpmGpu);
+        }
+
+        [Test]
+        public static void Decide_HeardButAutoNotConfirmed_StillNotAPass_EvenByTheUsersWord()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.AutoReadBackOk = false;
+            rig.PctRpm = delegate(int pct) { return rig.AutoRpm; };
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.True(r.Status != StepStatus.Passed, "Automático must be confirmed by the read-back first");
+            Assert.True(r.Reason.Contains("automático"), r.Reason);
+        }
+
+        [Test]
+        public static void Decide_HeardAfterHeat_IsStillNeverAPass()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.PctRpm = delegate(int pct) { return rig.AutoRpm; };
+            rig.OnSleep = delegate(int ms) { if (rig.Ms >= 5000) rig.Temp = 92; };
+            ManualFanAttempt a = new ManualFanAttempt();
+            a.Result = rig.Runner.Run(ManualFanTarget.Both, 90);
+            a.Heard = true;
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(a);
+            Assert.Equal(StepStatus.Skipped, ManualFanOutcome.Decide(FanLayout.Both, l).Status);
+        }
+
+        [Test]
+        public static void Decide_UserWordCoversOnlyTheFansAddressed()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.PctRpm = delegate(int pct) { return rig.AutoRpm; };
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Cpu, 80, true));
+            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
+            Assert.Equal(StepStatus.Skipped, r.Status);
+            Assert.True(r.CpuOk && !r.GpuOk, "cpu by the user's word, gpu still to do");
+            Assert.True(r.Reason.Contains("GPU"), r.Reason);
+        }
+
+        [Test]
+        public static void UserConfirmed_UnlocksTheFanControlWithoutAnRpmReference()
         {
             Rig rig = new Rig(FanLayout.Both);
             rig.PctRpm = delegate(int pct) { return rig.AutoRpm; };
             List<ManualFanAttempt> l = new List<ManualFanAttempt>();
             l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
-            FanTestResult r = ManualFanOutcome.Decide(FanLayout.Both, l);
-            Assert.Equal(StepStatus.Failed, r.Status);
-            Assert.True(r.Reason.Contains("ouviu") && r.Reason.Contains("rotação"), r.Reason);
+            EnvTestResults t = new EnvTestResults();
+            t.Fan = ManualFanOutcome.Decide(FanLayout.Both, l);
+            CapabilityProfile p = CapabilityBuilder.Build(DetectionResult.Interpret(CapabilityTests.ThisPc()), t, "2026-11-17T12:00:00Z");
+            Assert.Equal(CapState.Confirmed, p.State(Cap.FanControl));
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, p.Find(Cap.FanControl).Method);
+            Config c = new Config();
+            EnvApply.Apply(c, p, t, "2026-11-17T12:00:00Z");
+            Assert.True(c.ManualFanAllowed, "the user's word unlocks the manual control");
+            Assert.Equal(0, c.FanMaxRpmCpu);
+        }
+
+        [Test]
+        public static void PlainManualWithoutAReference_StaysLocked()
+        {
+            // only the user-confirmed method may unlock without an RPM reference
+            Rig rig = new Rig(FanLayout.Both);
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            EnvTestResults t = new EnvTestResults();
+            t.Fan = ManualFanOutcome.Decide(FanLayout.Both, l);
+            t.Fan.MaxRpmCpu = 0;
+            t.Fan.MaxRpmGpu = 0;
+            CapabilityProfile p = CapabilityBuilder.Build(DetectionResult.Interpret(CapabilityTests.ThisPc()), t, "2026-11-17T12:00:00Z");
+            Config c = new Config();
+            EnvApply.Apply(c, p, t, "2026-11-17T12:00:00Z");
+            Assert.True(!c.ManualFanAllowed, "no reference and no user word: locked");
+        }
+
+        [Test]
+        public static void UserConfirmed_IsCarriedByThePriorTestSkip()
+        {
+            Rig rig = new Rig(FanLayout.Both);
+            rig.PctRpm = delegate(int pct) { return rig.AutoRpm; };
+            List<ManualFanAttempt> l = new List<ManualFanAttempt>();
+            l.Add(Attempt(rig, ManualFanTarget.Both, 80, true));
+            EnvTestResults t = new EnvTestResults();
+            t.Fan = ManualFanOutcome.Decide(FanLayout.Both, l);
+            CapabilityProfile p = CapabilityBuilder.Build(DetectionResult.Interpret(CapabilityTests.ThisPc()), t, "2026-11-17T12:00:00Z");
+            PriorTest prior = PriorTests.Fan(p, p.Fingerprint);
+            Assert.True(prior != null, "a prior test exists");
+            EnvTestResults next = new EnvTestResults();
+            PriorTests.CarryFan(next, p, prior, 0, 0);
+            Assert.Equal(ManualFanOutcome.MethodUserConfirmed, next.Fan.Method);
+            CapabilityProfile p2 = CapabilityBuilder.Build(DetectionResult.Interpret(CapabilityTests.ThisPc()), next, "2026-11-17T13:00:00Z");
+            Config c = new Config();
+            EnvApply.Apply(c, p2, next, "2026-11-17T13:00:00Z");
+            Assert.True(c.ManualFanAllowed, "still unlocked after 'Pular (já testado)'");
         }
 
         [Test]

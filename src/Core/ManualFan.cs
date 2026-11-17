@@ -125,6 +125,15 @@ namespace Forja.Core
     public static class ManualFanOutcome
     {
         public const string Method = "manual";
+        // The user heard the fans change but the measurement did not show it (or the RPM could not be read) for at least one
+        // fan: the user's word wins and unlocks the fan control. Recorded as such; the RPM-response guard has no reference
+        // for that fan (Config.ManualFanAllowed accepts exactly this method without one).
+        public const string MethodUserConfirmed = "manual (confirmado pelo usuário, sem medição)";
+
+        public static bool IsUserConfirmed(string method)
+        {
+            return string.Equals(method, MethodUserConfirmed, StringComparison.Ordinal);
+        }
 
         public static FanTestResult Decide(FanLayout layout, List<ManualFanAttempt> attempts)
         {
@@ -134,6 +143,8 @@ namespace Forja.Core
             if (attempts == null) attempts = new List<ManualFanAttempt>();
             bool cpuOk = false, gpuOk = false;
             int cpuMax = 0, gpuMax = 0;
+            // fans confirmed by the user's word alone, with what the measurement showed for them
+            List<string> byUser = new List<string>();
             ManualFanAttempt last = null;
             foreach (ManualFanAttempt a in attempts)
             {
@@ -159,19 +170,18 @@ namespace Forja.Core
                     return Finish(r, layout, cpuOk, gpuOk, cpuMax, gpuMax, true);
                 }
                 if (a.Heard != true) continue;
-                // the user heard it: the measurement must agree for each fan that was addressed
+                // The user heard it: that settles each fan that was addressed. A measured change also gives the RPM guard its
+                // reference; without one (small change, inconclusive, unreadable RPM) the user's word alone confirms the fan.
                 ManualFanVerdict[] vs = { m.Cpu, m.Gpu };
                 foreach (ManualFanVerdict v in vs)
                 {
-                    if (v == null || v.Inconclusive) continue;
-                    if (!v.Moved)
-                    {
-                        r.Status = StepStatus.Failed;
-                        r.Reason = v.Name + " — você ouviu a mudança, mas " + v.Reason;
-                        return Finish(r, layout, cpuOk, gpuOk, cpuMax, gpuMax, true);
-                    }
-                    if (v.Name == "CPU") { cpuOk = true; cpuMax = v.EstimatedMax; }
-                    else { gpuOk = true; gpuMax = v.EstimatedMax; }
+                    if (v == null) continue;
+                    bool measured = v.Moved;
+                    int max = measured ? v.EstimatedMax : 0;
+                    if (v.Name == "CPU") { cpuOk = true; cpuMax = max; }
+                    else { gpuOk = true; gpuMax = max; }
+                    string entry = v.Name + ": " + Measured(v, m.Pct);
+                    if (!measured) byUser.Add(entry);
                 }
             }
             bool all = (!layout.Cpu || cpuOk) && (!layout.Gpu || gpuOk);
@@ -183,9 +193,29 @@ namespace Forja.Core
                 r.GpuOk = layout.Gpu && gpuOk;
                 r.MaxRpmCpu = layout.Cpu ? cpuMax : 0;
                 r.MaxRpmGpu = layout.Gpu ? gpuMax : 0;
+                bool unmeasured = (layout.Cpu && cpuMax <= 0) || (layout.Gpu && gpuMax <= 0);
+                if (unmeasured)
+                {
+                    r.Method = MethodUserConfirmed;
+                    r.Reason = "você ouviu a mudança, e isso vale mais que a medição. Medido: " + string.Join("; ", byUser.ToArray());
+                }
                 return r;
             }
             return Finish(r, layout, cpuOk, gpuOk, cpuMax, gpuMax, false);
+        }
+
+        // What the measurement showed for a fan, in words (kept in the result when the user's word overrode it).
+        private static string Measured(ManualFanVerdict v, int pct)
+        {
+            if (v.Baseline <= 0 || v.Settled <= 0) return "sem leitura de rotação";
+            string s = "automático " + v.Baseline.ToString(CultureInfo.InvariantCulture) + " RPM, a " + pct.ToString(CultureInfo.InvariantCulture)
+                + "% " + v.Settled.ToString(CultureInfo.InvariantCulture) + " RPM";
+            double change = (v.Settled - v.Baseline) * 100.0 / v.Baseline;
+            string pctText = Math.Abs(Math.Round(change)).ToString("0", CultureInfo.InvariantCulture);
+            string how = v.Inconclusive ? "inconclusivo (velocidade perto do automático)"
+                : Math.Abs(change) < FanValidation.MinMove * 100 ? "variação de " + pctText + "%, abaixo dos 10% que a medição pede"
+                : "variação de " + pctText + "% em outra direção que a esperada";
+            return s + " — " + how;
         }
 
         // Not passed. failed = a real "no"; otherwise nothing proved (locked, can be redone).

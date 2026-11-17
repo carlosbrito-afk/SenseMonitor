@@ -137,6 +137,48 @@ namespace Forja.App
 
         // ---- exit --------------------------------------------------------------------------
 
+        // The installer, the uninstaller, the update helper and deploy.ps1 ask the app to leave through a named event
+        // (Global\SenseMonitor.Sair, Administrators/SYSTEM only), then fall back to taskkill. A thread waits on it and only
+        // POSTS the orderly exit to the UI thread (the same RequestExit as a logoff): nothing else runs off the UI thread.
+        private void StartExitSignal()
+        {
+            try
+            {
+                string error;
+                exitEvent = ExitEvent.CreateForApp(out error);
+                if (exitEvent == null)
+                {
+                    Program.LogLine("Evento de saída: " + error + " (os fechamentos externos usam só o pedido de fechar a janela).");
+                    return;
+                }
+                exitListener = new ExitSignalListener(exitEvent, delegate
+                {
+                    Program.LogLine("Evento de saída recebido: saindo (ventoinhas ao automático primeiro).");
+                    PostToUi(RequestExit);
+                }, Program.LogError);
+                exitListener.Start();
+            }
+            catch (Exception ex)
+            {
+                Program.LogError(ex);
+            }
+        }
+
+        private void StopExitSignal()
+        {
+            try
+            {
+                if (exitListener != null) exitListener.Dispose();
+                exitListener = null;
+                if (exitEvent != null) exitEvent.Close();
+                exitEvent = null;
+            }
+            catch (Exception ex)
+            {
+                Program.LogError(ex);
+            }
+        }
+
         // Logoff/shutdown or an external close: fans to Auto synchronously, then exit.
         public void RequestExit()
         {
@@ -229,6 +271,7 @@ namespace Forja.App
             if (cleanedUp) return;
             cleanedUp = true;
             exiting = true;
+            StopExitSignal();
             CancelEnvWizard();
             ShutdownFans();
             StopUpdater();

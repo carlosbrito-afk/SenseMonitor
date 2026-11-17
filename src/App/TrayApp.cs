@@ -72,6 +72,9 @@ namespace Forja.App
         private readonly FanWatchdogThread watchdogThread;
         private Icon smallIcon;
         private Icon largeIcon;
+        // The named exit event (Global\SenseMonitor.Sair) and the thread that waits on it; see TrayApp.Lifecycle.cs.
+        private EventWaitHandle exitEvent;
+        private ExitSignalListener exitListener;
 
         private SensorReading latest = new SensorReading();
         private TelemetryHub telemetry;
@@ -126,6 +129,11 @@ namespace Forja.App
             telemetry = new TelemetryHub(this); // before the pages: they acquire it
             form = new MainForm(this);
             SingleInstance.AllowShowMessage(form.Handle); // creates the (hidden) window handle
+            // The handle exists now: the main window must be the first top-level window of the process from the very start, not
+            // only after the first trim (a freshly started hidden app was twice deaf to taskkill's WM_CLOSE). The exit event is
+            // the reliable channel; this keeps the fallback honest.
+            KeepFormFirst();
+            StartExitSignal();
 
             trayMenu = new TrayMenu(this, form);
             menu = trayMenu.Menu;

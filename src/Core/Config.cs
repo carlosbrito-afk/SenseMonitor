@@ -79,7 +79,11 @@ namespace Forja.Core
                 if (!Env.Allows(Cap.FanControl)) return false;
                 FanLayout l = Env.Layout;
                 if (l == null) return false;
-                return (!l.Cpu || FanMaxRpmCpu > 0) && (!l.Gpu || FanMaxRpmGpu > 0);
+                // The user heard the fans change but nothing could be measured for at least one of them: their word is the
+                // proof, so that fan needs no RPM reference (the RPM-response guard then stays off, see FanController).
+                CapEntry fan = Env.Find(Cap.FanControl);
+                bool byUser = fan != null && ManualFanOutcome.IsUserConfirmed(fan.Method);
+                return (!l.Cpu || FanMaxRpmCpu > 0 || byUser) && (!l.Gpu || FanMaxRpmGpu > 0 || byUser);
             }
         }
 

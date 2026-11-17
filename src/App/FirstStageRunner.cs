@@ -219,13 +219,17 @@ namespace Forja.App
 
         internal static DialogResult AskHandOff()
         {
+            // The installed exe's version against this one: an older file over a newer install is its own question
+            // (HandOffPrompt), with the installed copy as the default and an explicit button to go back.
             UpdateVersion there = UpdateHelper.InstalledVersion();
-            return MessageBox.Show(
-                "O SenseMonitor já está instalado (versão " + there + ").\n\n"
-                + "Sim: abrir o que está instalado.\n"
-                + "Não: atualizar/reinstalar com este arquivo (versão " + AppVersion.Text + ").\n"
-                + "Cancelar: não fazer nada.",
-                "SenseMonitor", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+            UpdateVersion mine;
+            if (!UpdateVersion.TryParse(AppVersion.Text, out mine)) mine = null;
+            switch (HandOffDialog.Ask(HandOffPrompt.For(there, mine)))
+            {
+                case HandOffAnswer.OpenInstalled: return DialogResult.Yes;
+                case HandOffAnswer.InstallThisFile: return DialogResult.No;
+                default: return DialogResult.Cancel;
+            }
         }
 
         // Nothing of the downloaded exe runs elevated. A running app is shown; otherwise the installed copy is

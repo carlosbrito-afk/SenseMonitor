@@ -194,7 +194,7 @@ namespace Forja.Core
             {
                 bool ok = (!cpuFan || t.Fan.CpuOk) && (!gpuFan || t.Fan.GpuOk);
                 p.Set(Cap.FanControl, ok ? CapState.Confirmed : CapState.Unavailable,
-                    ok ? "As ventoinhas seguiram os comandos no teste." : (t.Fan.Reason ?? "Uma ventoinha não seguiu o comando no teste."));
+                    ok ? (ManualFanOutcome.IsUserConfirmed(t.Fan.Method) ? "Você confirmou ouvindo a mudança das ventoinhas no teste manual (a medição de rotação não bastou)." : "As ventoinhas seguiram os comandos no teste.") : (t.Fan.Reason ?? "Uma ventoinha não seguiu o comando no teste."));
             }
             else if (t.Fan.Status == StepStatus.Failed)
             {
